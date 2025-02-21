@@ -1,5 +1,3 @@
-
-
 import torch
 import numpy as np
 import pandas as pd
@@ -16,15 +14,19 @@ from requests.exceptions import RequestException
 import torch.nn as nn
 import torch.nn.functional as F
 from pxlstm import ParallelExtendedMLSTM
-from yfinance.exceptions import YFRateLimitError  # import the specific exception
+from yfinance.exceptions import YFRateLimitError 
 
-# Configurations
+
+
+# [Previous functions: safe_fetch, fetch_chunk, get_stock_data, get_daily_data, 
+#  get_hourly_data, merge_datasets, add_technical_indicators, StockDataset, 
+#  FunnyMachine, prepare_data, create_sequences remain unchanged]
+
+# config params
 SEQ_LENGTH = 72  
 BATCH_SIZE = 32
 EPOCHS = 25
 FEATURES = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
-
-
 
 def safe_fetch(ticker, start, end, retries=15, delay=10):
     """
@@ -330,21 +332,18 @@ def create_sequences(scaled_data, target_scaled, seq_length, augment=True):
     return np.array(X), np.array(y)
 
 def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')  # Explicitly set to CPU for MacBook Pro Intel
     model.to(device)
-    
     
     criterion = nn.HuberLoss(delta=0.5)
     optimizer = AdamW(
         model.parameters(), 
-        lr=1e-4,  # Slightly higher learning rate
-        weight_decay=1e-4,  # Reduced weight decay
+        lr=1e-4,
+        weight_decay=1e-4,
         eps=1e-8
     )
     
-   
     l1_lambda = 1e-5  
-   
     scheduler = lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=5e-4,
@@ -353,13 +352,12 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
         steps_per_epoch=len(train_loader),
         epochs=epochs,
         pct_start=0.3,
-        anneal_strategy=('cos')  
+        anneal_strategy='cos'
     )
     
     best_val_loss = float('inf')
-    patience = 7  
-    min_delta = 1e-4  
-    best_val_loss = float('inf')
+    patience = 7
+    min_delta = 1e-4
     waiting = 0
     GRAD_CLIP_VALUE = 0.5
 
@@ -369,7 +367,6 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
         
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            
             optimizer.zero_grad()
             outputs = model(X_batch)
             l1_norm = sum(p.abs().sum() for p in model.parameters())
@@ -377,7 +374,6 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_VALUE)
             optimizer.step()
-            
             train_loss += loss.item()
         
         model.eval()
@@ -411,13 +407,12 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'mape': mape,
-            }, 'predictor6_MSFT.pth')
+            }, 'prediction_MSFT.pth')
         else:
             waiting += 1
             if waiting >= patience:
                 print(f'Early stopping triggered at epoch {epoch+1}')
                 break
-
 
 def main():
     alreadygot = False
@@ -438,14 +433,12 @@ def main():
                          index_col=0, 
                          parse_dates=True)
 
-        # Convert data types after loading
         numeric_columns = ['Close', 'High', 'Low', 'Open', 'Volume']
         for col in numeric_columns:
             daily_data[col] = pd.to_numeric(daily_data[col], errors='coerce')
             hourly_data[col] = pd.to_numeric(hourly_data[col], errors='coerce')
 
         df = merge_datasets(daily_data, hourly_data)
-
     
     df = add_technical_indicators(df)
     processed_df = prepare_data(df)
@@ -476,20 +469,11 @@ def main():
         val_dataset = StockDataset(X_val_seq, y_val_seq)
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, num_workers=4, pin_memory=True)
-        """
-        self.extended_mlstm = ParallelExtendedMLSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            matrix_size=matrix_size,
-            num_layers=2,
-            dropout=dropout,
-            expansion_factor=4,     # adapt if desired
-        )
-        """
+
         model = FunnyMachine(
             input_size=X_train_seq.shape[2],
-            hidden_size=32,    # Reduced from 64 to manage memory
-            matrix_size=2,   
+            hidden_size=32,
+            matrix_size=1,  # Set to 1 to reduce memory usage for MacBook Pro with Intel CPU and GPU
             dropout=0.2
         )
         print("Model Architecture:")
@@ -502,3 +486,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
