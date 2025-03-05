@@ -1,12 +1,90 @@
-# xLSTM Implementation
+# Matrix LSTM (xLSTM & S-mLSTM) Implementation
 
 ## Overview
-This repository implements an **xLSTM-based architecture** using **matrix LSTMs (mLSTM)** for efficient long-term memory storage and retrieval. The model is designed to enhance traditional LSTMs by incorporating **matrix memory updates** and **parallel computation** for improved scalability and efficiency.
+This repository implements advanced **Matrix LSTM variants** including:
+1. **xLSTM** - Extended LSTM with matrix-based memory
+2. **S-mLSTM** - Structured Memory LSTM optimized for financial time series
 
-## Theoretical Foundation
-The implementation is based on the xLSTM and mLSTM architectures described in various research papers. The core idea revolves around **storing information in a d×d matrix (C_t)** rather than a scalar, enabling better **associative memory retrieval**.
+These models enhance traditional LSTMs by storing information in **matrices rather than vectors**, enabling more powerful pattern recognition, associative memory, and long-term dependencies tracking.
 
-## Core Equations & Implementation
+## Mathematical Foundations
+
+### Matrix Memory Mechanism
+
+The key innovation in xLSTM/S-mLSTM is replacing the scalar cell state with a **matrix memory cell** $\mathbf{C}_t \in \mathbb{R}^{d \times d}$:
+
+$$\mathbf{C}_t = \mathbf{f}_t \odot \mathbf{C}_{t-1} + \mathbf{i}_t \odot (\mathbf{v}_t \mathbf{k}_t^T)$$
+
+Where:
+- $\mathbf{C}_t$ is the memory matrix at time $t$
+- $\mathbf{f}_t$ is the forget gate (controls memory persistence)
+- $\mathbf{i}_t$ is the input gate (controls new information flow)
+- $\mathbf{v}_t$ is the value vector (information to store)
+- $\mathbf{k}_t$ is the key vector (addressing/indexing information)
+- $\mathbf{v}_t \mathbf{k}_t^T$ creates an **outer product** matrix representing associative memory
+
+### Key Normalization
+To ensure stable memory retrieval, a normalizer state $\mathbf{n}_t$ tracks key strengths:
+
+$$\mathbf{n}_t = \mathbf{f}_t \odot \mathbf{n}_{t-1} + \mathbf{i}_t \odot \mathbf{k}_t$$
+
+### Information Retrieval
+Information is retrieved using query vectors $\mathbf{q}_t$ via matrix-vector product and normalization:
+
+$$\mathbf{h}_t = \mathbf{o}_t \odot \frac{\mathbf{C}_t \mathbf{q}_t}{\max(|\mathbf{n}_t^T \mathbf{q}_t|, \lambda)}$$
+
+Where:
+- $\mathbf{o}_t$ is the output gate
+- $\lambda$ is a stabilization threshold (typically 1.0)
+
+### Exponential Gating
+For improved gradient flow and stability, we use exponential parametrization of gates:
+
+$$\mathbf{i}_t = \exp(\tilde{\mathbf{i}}_t - \mathbf{m}_t)$$
+$$\mathbf{f}_t = \exp(\tilde{\mathbf{f}}_t + \mathbf{m}_{t-1} - \mathbf{m}_t)$$
+
+Where $\mathbf{m}_t = \max(\tilde{\mathbf{f}}_t + \mathbf{m}_{t-1}, \tilde{\mathbf{i}}_t)$ ensures numerical stability.
+
+## Model Variants
+
+### xLSTM (Extended LSTM)
+The base matrix-memory LSTM implementation with:
+- Matrix cell state for storing associative memory
+- Key-value storage mechanism
+- Query-based information retrieval
+- Parallel sequence processing
+
+### S-mLSTM (Structured Memory LSTM)
+Enhances xLSTM with:
+- **State-Space Model (SSM)** integration for multi-scale temporal dynamics
+- **Market regime detection** for financial time series
+- **Volatility-aware** memory scaling
+- **Multi-timescale modeling** optimized for financial patterns
+
+## Financial Applications
+The S-mLSTM is specifically designed for financial time series analysis with:
+
+1. **Market Regime Detection**:
+   - Automatically identifies bull/bear/sideways/volatile market conditions
+   - Adapts memory dynamics based on detected regimes
+
+2. **Volatility Awareness**:
+   - Scales memory updates inversely with market volatility
+   - More cautious predictions during high volatility periods
+
+3. **Multi-scale Processing**:
+   - Captures patterns from hourly to quarterly timeframes
+   - Integrates different market cycle dynamics
+
+## Parallel Processing Architecture
+The implementation features:
+- **Fully parallelized sequence processing** for training efficiency
+- **Cumulative computations** for parallel gate and memory updates
+- **Checkpointed gradient computation** for memory efficiency with long sequences
+
+## Implementation Details
+
+### Core Components:
 
 ### 1. Matrix Memory Update
 **Equation:**

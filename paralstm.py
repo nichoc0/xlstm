@@ -15,7 +15,7 @@ from yfinance import download
 from requests.exceptions import RequestException
 import torch.nn as nn
 import torch.nn.functional as F
-from pxlstm import ParallelExtendedMLSTM
+from psmlstm import ParallelExtendedSMLSTM
 from yfinance.exceptions import YFRateLimitError  # import the specific exception
 
 # Configurations
@@ -247,64 +247,102 @@ class StockDataset(Dataset):
 class FunnyMachine(nn.Module):
     def __init__(self, input_size, hidden_size=32, matrix_size=4, dropout=0.2):
         super().__init__()
-        # Extended mLSTM (without attention) used as branch:
-        self.extended_mlstm = ParallelExtendedMLSTM(
+        # Replace with structured memory LSTM
+        self.extended_mlstm = ParallelExtendedSMLSTM(
             input_size=input_size,
             hidden_size=hidden_size,
             matrix_size=matrix_size,
             num_layers=2,
             dropout=dropout,
-            expansion_factor=4,     # adapt if desired
+            expansion_factor=4,
         )
         self.output_layer = nn.Linear(hidden_size * matrix_size**2, 5)
+        
+        # New: market regime-aware output adaptation
+        self.regime_adapter = nn.Linear(4, 5)  # 4 regime probabilities to 5 outputs
 
     def forward(self, x):
-        x = self.extended_mlstm(x)
-        x = F.gelu(x)  # Add final GELU before output
-        return self.output_layer(x.mean(1))
+        # The new model returns multiple outputs
+        outputs, regime, signals = self.extended_mlstm(x)
+        outputs = F.gelu(outputs)  # Apply GELU activation
+        
+        # Pool across sequence dimension
+        pooled_output = outputs.mean(1)
+        
+        # Base predictions
+        base_predictions = self.output_layer(pooled_output)
+        
+        # Regime-conditioned adjustment (small influence)
+        regime_adjustment = self.regime_adapter(regime) * 0.1
+        
+        # Combine base predictions with regime awareness
+        final_predictions = base_predictions + regime_adjustment
+        
+        return final_predictions, regime, signals
 def prepare_data(df):
     df = df.copy()
     print("Initial data size:", len(df))
     df = df.ffill().bfill()
 
     close = df['Close']
-    df['Returns'] = close.pct_change()
+    high = df['High']
+    low = df['Low']
+    volume = df['Volume']
+    
+    # PRICE DYNAMICS - minimal overlap
+    df['Returns'] = close.pct_change()  # Keep daily returns as baseline
     df['Log_Returns'] = np.log1p(df['Returns'].replace([-np.inf, np.inf], np.nan))
-
-    df['RSI'] = ta.momentum.RSIIndicator(close=close).rsi()
-    macd = ta.trend.MACD(close=close)
-    df['MACD'] = macd.macd()
-    df['MACD_signal'] = macd.macd_signal()
-    df['ATR'] = ta.volatility.AverageTrueRange(
-        high=df['High'], low=df['Low'], close=close
-    ).average_true_range()
-
-    bollinger = ta.volatility.BollingerBands(close=close)
-    df['BB_upper'] = bollinger.bollinger_hband()
-    df['BB_middle'] = bollinger.bollinger_mavg()
-    df['BB_lower'] = bollinger.bollinger_lband()
-    df['ADX'] = ta.trend.ADXIndicator(
-        high=df['High'], low=df['Low'], close=close, window=14
-    ).adx()
-    df['OBV'] = ta.volume.OnBalanceVolumeIndicator(
-        close=close, volume=df['Volume']
-    ).on_balance_volume()
-    df['Price_SMA_10'] = close.rolling(window=10, min_periods=1).mean()
-    df['Price_SMA_30'] = close.rolling(window=30, min_periods=1).mean()
-    df['Price_EMA_10'] = close.ewm(span=10, adjust=False, min_periods=1).mean()
-    df['Historical_Vol'] = close.rolling(window=20, min_periods=1).std() / \
-                          close.rolling(window=20, min_periods=1).mean()
-    df['Volume_MA'] = df['Volume'].rolling(window=20, min_periods=1).mean()
-    df['Volume_STD'] = df['Volume'].rolling(window=20, min_periods=1).std()
-    df['DayOfWeek'] = df.index.dayofweek
-    df['MonthOfYear'] = df.index.month
+    
+    # TREND INDICATORS - different timeframes
+    df['EMA_Short'] = close.ewm(span=12, adjust=False).mean() / close - 1  # Short-term trend
+    df['EMA_Medium'] = close.ewm(span=26, adjust=False).mean() / close - 1  # Medium-term trend
+    df['EMA_Long'] = close.ewm(span=50, adjust=False).mean() / close - 1  # Long-term trend
+    
+    # MOMENTUM INDICATORS - distinct calculations
+    df['RSI'] = ta.momentum.RSIIndicator(close=close, window=14).rsi() / 100  # Normalized
+    df['MACD'] = ta.trend.MACD(close=close).macd_diff()  # Only difference, more informative
+    df['ROC'] = ta.momentum.ROCIndicator(close=close, window=10).roc()  # Rate of change
+    
+    # VOLATILITY INDICATORS
+    df['ATR_Norm'] = ta.volatility.AverageTrueRange(
+        high=high, low=low, close=close, window=14
+    ).average_true_range() / close  # Normalized by price
+    
+    bb = ta.volatility.BollingerBands(close=close, window=20)
+    df['BB_Width'] = (bb.bollinger_hband() - bb.bollinger_lband()) / bb.bollinger_mavg()  # Width only
+    
+    # VOLUME INDICATORS - distinct aspects
+    df['OBV_Change'] = ta.volume.OnBalanceVolumeIndicator(
+        close=close, volume=volume
+    ).on_balance_volume().pct_change()  # OBV momentum
+    
+    df['Volume_Price_Trend'] = ta.volume.VolumePriceTrendIndicator(
+        close=close, volume=volume
+    ).volume_price_trend()  # Volume-price relationship
+    
+    # SUPPORT/RESISTANCE INDICATORS
+    df['Stochastic_K'] = ta.momentum.StochasticOscillator(
+        high=high, low=low, close=close
+    ).stoch() / 100  # Position within range
+    
+    # MARKET REGIME INDICATORS
+    df['ADX'] = ta.trend.ADXIndicator(high=high, low=low, close=close).adx() / 100  # Trend strength
+    
+    # CYCLICAL FEATURES
+    df['DayOfWeek'] = df.index.dayofweek / 6  # Normalized 0-1
+    df['HourOfDay'] = df.index.hour / 23  # Normalized 0-1
+    df['DayOfMonth'] = df.index.day / 31  # Normalized 0-1
+    
+    # LAGGED FEATURES - important for sequence modeling
     df['Price_Change_Lag1'] = df['Returns'].shift(1)
-    df['Price_Change_Lag2'] = df['Returns'].shift(2)
+    
+    # CROSS-ASSET FEATURES (if available)
+    # df['SPY_Correlation'] = ...  # Would require additional data
+    
     print("After technical indicators:", len(df))
-
     df = df.dropna().ffill().bfill().replace([np.inf, -np.inf], np.nan).fillna(df.mean())
+    
     return df
-
 def create_sequences(scaled_data, target_scaled, seq_length, augment=True):
     X, y = [], []
     for i in range(seq_length, len(scaled_data) - 5):
@@ -333,18 +371,15 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     
-    
     criterion = nn.HuberLoss(delta=0.5)
     optimizer = AdamW(
         model.parameters(), 
-        lr=1e-4,  # Slightly higher learning rate
-        weight_decay=1e-4,  # Reduced weight decay
+        lr=1e-4,
+        weight_decay=1e-4,
         eps=1e-8
     )
     
-   
     l1_lambda = 1e-5  
-   
     scheduler = lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=5e-4,
@@ -353,16 +388,17 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
         steps_per_epoch=len(train_loader),
         epochs=epochs,
         pct_start=0.3,
-        anneal_strategy=('cos')  
+        anneal_strategy='cos'
     )
     
     best_val_loss = float('inf')
     patience = 7  
     min_delta = 1e-4  
-    best_val_loss = float('inf')
     waiting = 0
     GRAD_CLIP_VALUE = 0.5
-
+    
+    regime_history = []  # Track market regime predictions
+    
     for epoch in range(epochs):
         model.train()
         train_loss = 0
@@ -371,7 +407,7 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             
             optimizer.zero_grad()
-            outputs = model(X_batch)
+            outputs, regime, signals = model(X_batch)  # Updated to handle multiple returns
             l1_norm = sum(p.abs().sum() for p in model.parameters())
             loss = criterion(outputs, y_batch) + l1_lambda * l1_norm
             loss.backward()
@@ -384,22 +420,54 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
         val_loss = 0
         all_outputs = []
         all_targets = []
+        all_regimes = []
+        all_signals = []
+        
         with torch.no_grad():
             for X_val, y_val in val_loader:
                 X_val, y_val = X_val.to(device), y_val.to(device)
-                outputs = model(X_val)
+                outputs, regime, signals = model(X_val)  # Updated to handle multiple returns
                 val_loss += criterion(outputs, y_val).item()
                 all_outputs.append(outputs.cpu())
                 all_targets.append(y_val.cpu())
+                all_regimes.append(regime.cpu())
+                all_signals.append(signals.cpu())
+                
         all_outputs = torch.cat(all_outputs, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        mape = torch.mean(torch.abs((all_targets - all_outputs) / all_targets)) * 100
+        all_regimes = torch.cat(all_regimes, dim=0)
+        all_signals = torch.cat(all_signals, dim=0)
+        
+        # Calculate metrics
+        mape = torch.mean(torch.abs((all_targets - all_outputs) / (all_targets + 1e-8))) * 100
+        rmse = torch.sqrt(torch.mean((all_targets - all_outputs) ** 2))
+        mae = torch.mean(torch.abs(all_targets - all_outputs))
+        
+        # Directional accuracy 
+        if all_targets.shape[1] > 1:
+            diff_pred = all_outputs[:, 1:] - all_outputs[:, :-1]
+            diff_true = all_targets[:, 1:] - all_targets[:, :-1]
+            directional_accuracy = torch.mean((torch.sign(diff_pred) == torch.sign(diff_true)).float()) * 100
+        else:
+            directional_accuracy = torch.tensor(0.0)
+        
+        # Calculate trading signal accuracy (if we had ground truth)
+        # Since we don't, just monitor distribution
+        signal_distribution = all_signals.mean(dim=0)
+        regime_distribution = all_regimes.mean(dim=0)
+        
+        # Store regime history for later analysis
+        regime_history.append(regime_distribution.numpy())
         
         train_loss /= len(train_loader)
         val_loss /= len(val_loader)
         scheduler.step()
         
-        print(f'Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, MAPE: {mape:.2f}%')
+        print(f'Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, '
+              f'MAPE: {mape:.2f}%, RMSE: {rmse:.4f}, MAE: {mae:.4f}, '
+              f'Directional Accuracy: {directional_accuracy:.2f}%')
+        print(f'Regime Distribution: {regime_distribution.numpy()}')
+        print(f'Signal Distribution: {signal_distribution.numpy()}')
         
         if val_loss < (best_val_loss - min_delta):
             best_val_loss = val_loss
@@ -411,13 +479,86 @@ def train_model(model, train_loader, val_loader, target_scaler, epochs=100):
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_loss,
                 'mape': mape,
-            }, 'predictor6_MSFT.pth')
+                'rmse': rmse,
+                'mae': mae,
+                'directional_accuracy': directional_accuracy,
+                'regime_distribution': regime_distribution,
+                'signal_distribution': signal_distribution,
+                'regime_history': regime_history,
+            }, 'smLSTM_predictor_MSFT.pth')  # New filename for new model
         else:
             waiting += 1
             if waiting >= patience:
                 print(f'Early stopping triggered at epoch {epoch+1}')
                 break
 
+def analyze_predictions(model, test_loader, target_scaler):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    model.eval()
+    
+    all_outputs = []
+    all_targets = []
+    all_regimes = []
+    all_signals = []
+    
+    with torch.no_grad():
+        for X_test, y_test in test_loader:
+            X_test, y_test = X_test.to(device), y_test.to(device)
+            outputs, regime, signals = model(X_test)
+            
+            all_outputs.append(outputs.cpu())
+            all_targets.append(y_test.cpu())
+            all_regimes.append(regime.cpu())
+            all_signals.append(signals.cpu())
+    
+    all_outputs = torch.cat(all_outputs, dim=0).numpy()
+    all_targets = torch.cat(all_targets, dim=0).numpy()
+    all_regimes = torch.cat(all_regimes, dim=0).numpy()
+    all_signals = torch.cat(all_signals, dim=0).numpy()
+    
+    # Convert scaled predictions back to original price
+    pred_prices = target_scaler.inverse_transform(all_outputs)
+    actual_prices = target_scaler.inverse_transform(all_targets)
+    
+    # Financial-specific metrics
+    mape = np.mean(np.abs((actual_prices - pred_prices) / actual_prices)) * 100
+    rmse = np.sqrt(np.mean((actual_prices - pred_prices) ** 2))
+    
+    # Directional accuracy (critical for trading)
+    diff_pred = np.diff(pred_prices, axis=1)
+    diff_actual = np.diff(actual_prices, axis=1)
+    dir_acc = np.mean((np.sign(diff_pred) == np.sign(diff_actual)))
+    
+    # Analyze by detected market regime
+    regime_labels = ["Bull", "Bear", "Sideways", "Volatile"]
+    dominant_regimes = np.argmax(all_regimes, axis=1)
+    
+    for i in range(len(regime_labels)):
+        regime_mask = dominant_regimes == i
+        if np.sum(regime_mask) > 0:
+            regime_mape = np.mean(np.abs((actual_prices[regime_mask] - pred_prices[regime_mask]) / 
+                                actual_prices[regime_mask])) * 100
+            print(f"{regime_labels[i]} Market Regime - MAPE: {regime_mape:.2f}%, Samples: {np.sum(regime_mask)}")
+    
+    # Signal analysis
+    signal_labels = ["Buy", "Hold", "Sell"]
+    recommended_signals = np.argmax(all_signals, axis=1)
+    signal_counts = np.bincount(recommended_signals, minlength=3)
+    
+    print("\nTrading Signal Distribution:")
+    for i, label in enumerate(signal_labels):
+        print(f"{label}: {signal_counts[i]} ({signal_counts[i]/len(recommended_signals)*100:.1f}%)")
+    
+    return {
+        'mape': mape,
+        'rmse': rmse,
+        'directional_accuracy': dir_acc,
+        'predictions': pred_prices,
+        'actuals': actual_prices,
+        'regimes': all_regimes,
+        'signals': all_signals
+    }
 
 def main():
     alreadygot = False
@@ -488,14 +629,19 @@ def main():
         """
         model = FunnyMachine(
             input_size=X_train_seq.shape[2],
-            hidden_size=32,    # Reduced from 64 to manage memory
-            matrix_size=2,   
+            hidden_size=32,    
+            matrix_size=4,     # Increased from 2 to capture more complex patterns
             dropout=0.2
         )
-        print("Model Architecture:")
+        
+        print("Enhanced s_mLSTM Stock Prediction Model:")
         print(model)
         total_params = sum(p.numel() for p in model.parameters())
         print(f"Total parameters: {total_params:,}")
+        
+        # Create feature importance tracker to monitor which financial indicators matter most
+        feature_names = list(features.columns)
+        print(f"Using {len(feature_names)} features: {feature_names}")
         
         train_model(model, train_loader, val_loader, target_scaler, epochs=EPOCHS)
         break
