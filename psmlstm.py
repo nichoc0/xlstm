@@ -232,24 +232,24 @@ class ParallelSMLSTMCell(nn.Module):
         scalar_vol = scalar_vol / (torch.mean(scalar_vol, dim=1, keepdim=True) + 1e-6)
         
         return scalar_vol
-
+    
     def stabilize_gates(self, i_tilde, f_tilde, m_prev):
-        """
-        Stabilize gates using LogSumExp trick for numerical stability.
-        Enhanced for financial time series with extreme values.
-        """
-        # Handle outliers and extreme values in financial data
-        m_prev_exp = m_prev.unsqueeze(-1).clamp(-100, 100)  # Prevent exploding values
-        
-        # Compute max term for LogSumExp stability
-        m_t = torch.maximum(f_tilde + m_prev_exp, i_tilde)
-        
-        # Stable computation with clipping for financial data extremes
-        i = torch.exp(torch.clamp(i_tilde - m_t, -15.0, 15.0))
-        f = torch.exp(torch.clamp(f_tilde + m_prev_exp - m_t, -15.0, 15.0))
-        
-        return i, f, m_t
-
+            batch_size, seq_len = i_tilde.shape[0], i_tilde.shape[1]
+            # Only add one unsqueeze to make it [batch, 1, 1]
+            m_prev_exp = m_prev.unsqueeze(1).clamp(-100, 100)  # Shape [batch, 1]
+            
+            # Add the final dimension here if needed
+            if m_prev.dim() == 2 and m_prev.shape[1] == 1:
+                m_prev_exp = m_prev_exp.unsqueeze(-1)  # Now shape [batch, 1, 1]
+            
+            # Compute max term for LogSumExp stability with explicit broadcasting
+            m_t = torch.maximum(f_tilde + m_prev_exp, i_tilde)
+            
+            # Stable computation with clipping for financial data extremes
+            i = torch.exp(torch.clamp(i_tilde - m_t, -15.0, 15.0))
+            f = torch.exp(torch.clamp(f_tilde + m_prev_exp - m_t, -15.0, 15.0))
+            
+            return i, f, m_t
     def store_key_value(self, key, value, i):
         """
         Compute key-value storage via outer product with improved numerical stability.
@@ -312,8 +312,8 @@ class ParallelSMLSTMCell(nn.Module):
         
         # Final memory is adaptively mixed using regime weights
         # Different regimes can rely more on raw vs. structured memory
-        # Reshape regime_weights: [batch, seq, regimes] -> [batch, seq, 1, 1]
-        mixing_factor = regime_weights[:, :, 0:1, None]
+        # Reshape regime_weights properly: [batch, seq, regimes] -> [batch, seq, 1, 1]
+        mixing_factor = regime_weights[:, :, 0:1].unsqueeze(-1)
         
         return C_mixed * mixing_factor + C_t * (1 - mixing_factor)
 
@@ -325,14 +325,14 @@ class ParallelSMLSTMCell(nn.Module):
         update = self.store_key_value(k, v, i)
         C_updates = torch.cumsum(update, dim=1)
         
-        # Handle extra dimensions
+        # Handle extra dimensions properly
         if f.dim() > 3:
             f = f.squeeze(-1)
         
-        # Compute cumulative forget product
-        f_cum = torch.cumprod(f.squeeze(-1), dim=1).unsqueeze(-1).unsqueeze(-1)
+        # Compute cumulative forget product without the additional squeeze
+        f_cum = torch.cumprod(f, dim=1).unsqueeze(-1).unsqueeze(-1)
         
-        # Expand previous memory state
+        # Rest of the method remains unchanged
         C_prev_expanded = C_prev.unsqueeze(1).expand(-1, seq_len, -1, -1)
         f_cum_expanded = f_cum.expand_as(C_prev_expanded)
         
