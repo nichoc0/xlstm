@@ -6,97 +6,56 @@ import numpy as np
 from torch.utils.checkpoint import checkpoint
 
 class StructuredStateSpace(nn.Module):
-    """
-    S4D-inspired structured state-space model for financial time series.
-    Uses proper discretization techniques and stable initialization.
-    """
     def __init__(self, d_state, d_model, discretization='bilinear', dt_min=0.001, dt_max=0.1):
         super().__init__()
         self.d_state = d_state
         self.d_model = d_model
         self.discretization = discretization
         
-        # Initialize discrete state-space parameters with proper constraints
-        # Lambda (Λ): diagonal state matrix with time constants for different trading horizons
-        # Initialize with negative real parts for stability (decay rates for different time scales)
         self.log_lambda_real = nn.Parameter(torch.linspace(math.log(dt_min), math.log(dt_max), d_state))
+        self.log_b = nn.Parameter(torch.randn(d_state, d_model).uniform_(-0.5, 0.5))
+        self.c = nn.Parameter(torch.randn(d_model, d_state) / math.sqrt(d_state))
+        self.log_d = nn.Parameter(torch.zeros(d_model))
         
-        # B: input projection (d_state × 1)
-        self.log_b = nn.Parameter(torch.randn(d_state, d_model).uniform_(-0.5, 0.5))        
-        # C: output projection (1 × d_state)
-        init_c = torch.randn(1, d_state) / math.sqrt(d_state)
-        self.c = nn.Parameter(torch.randn(d_model, d_state) / math.sqrt(d_state))        
-        # D: skip connection (scalar)
-        self.log_d = nn.Parameter(torch.zeros(d_model))        
-        # Trading-specific timescales (daily, weekly, monthly, quarterly)
-        # Represented as step sizes for discretization
-        market_timescales = torch.tensor([
-            1.0/24.0,     # Hourly
-            1.0,          # Daily
-            5.0,          # Weekly
-            21.0,         # Monthly
-            63.0,         # Quarterly
-        ])
-        
-        # Ensure we have at least as many as d_state
+        market_timescales = torch.tensor([1.0/24.0, 1.0, 5.0, 21.0, 63.0])
         if len(market_timescales) > d_state:
             market_timescales = market_timescales[:d_state]
         elif len(market_timescales) < d_state:
-            # Fill remaining with interpolated values
-            extra = torch.linspace(
-                market_timescales[-1],
-                market_timescales[-1] * 3,
-                d_state - len(market_timescales)
-            )
+            extra = torch.linspace(market_timescales[-1], market_timescales[-1] * 3, d_state - len(market_timescales))
             market_timescales = torch.cat([market_timescales, extra])
-            
-        # Register buffer (non-parameter tensor)
         self.register_buffer('market_timescales', market_timescales)
-        
-        # Learnable step size parameter (dt) - initialized based on market timescales
         self.log_step = nn.Parameter(torch.log(market_timescales.clone()))
         
-        # Volatility awareness parameters (scale hidden states based on volatility)
-        self.volatility_gate = nn.Parameter(torch.ones(d_model))        
-        # Learnable mixing coefficient for residual connection
-        self.alpha = nn.Parameter(torch.tensor(0.7))
+        # Fix: volatility_gate should match d_state, not d_model
+        self.volatility_gate = nn.Parameter(torch.ones(d_state))  # Changed from d_model
         
-        # Normalization for numerical stability
+        self.alpha = nn.Parameter(torch.tensor(0.7))
         self.layer_norm = nn.LayerNorm(d_state)
 
     def forward(self, x, volatility_scale=None):
-        """
-        Apply structured state-space transformation.
-        """
         batch, seq_len, _ = x.shape
-        
-        # Get continuous parameters
-        lambda_real = -torch.exp(self.log_lambda_real)  # Negative real ensures stability
+        lambda_real = -torch.exp(self.log_lambda_real)
         b = torch.exp(self.log_b)
         c = self.c
         d = torch.exp(self.log_d)
-        step = torch.exp(self.log_step)  # Adaptive step size
+        step = torch.exp(self.log_step)
         
-        # First compute discretized parameters with correct dimensions
-        step_expanded = step.unsqueeze(0)  # [1, d_state]
-        lambda_expanded = lambda_real.unsqueeze(1)  # [d_state, 1]
+        step_expanded = step.unsqueeze(0)
+        lambda_expanded = lambda_real.unsqueeze(1)
         
         if self.discretization == 'zoh':
             a_discrete = torch.exp(lambda_expanded * step_expanded)
             b_discrete = ((a_discrete - 1.0) / lambda_expanded) * b
-            
         elif self.discretization == 'bilinear':
-            # Bilinear discretization (better for financial data)
             a_discrete = (2.0 + step_expanded * lambda_expanded) / (2.0 - step_expanded * lambda_expanded)
             b_discrete = step_expanded * (torch.ones_like(a_discrete) + a_discrete) * b / 2.0
         
-        # Slice or repeat to match sequence length
         if a_discrete.shape[1] > seq_len:
             a_discrete = a_discrete[:, :seq_len]
         else:
             a_discrete = a_discrete.repeat(1, math.ceil(seq_len / a_discrete.shape[1]))[:, :seq_len]
         
-        a_discrete = a_discrete[:, :seq_len].unsqueeze(0).expand(batch, -1, -1).transpose(1, 2)
+        a_discrete = a_discrete.unsqueeze(0).expand(batch, -1, -1).transpose(1, 2)
         b_discrete = b_discrete.unsqueeze(0).expand(batch, -1, -1)
         x_proj = x
         h = torch.zeros(batch, self.d_state, device=x.device)
@@ -107,7 +66,7 @@ class StructuredStateSpace(nn.Module):
             h = self.layer_norm(h)
             if volatility_scale is not None:
                 vol_influence = torch.sigmoid(self.volatility_gate) * volatility_scale[:, t]
-                h = h * (1.0 / (1.0 + vol_influence))
+                h = h * (1.0 / (1.0 + vol_influence))  # Now both are [batch, d_state]
             y = torch.matmul(h, c.transpose(0, 1)) + d * x_proj[:, t, :]
             outputs.append(y)
         y = torch.stack(outputs, dim=1)
@@ -143,7 +102,7 @@ class ParallelSMLSTMCell(nn.Module):
         # Structured state-space memory model for each matrix dimension
         self.ssm = StructuredStateSpace(
             d_state=hidden_size*2,  # Larger state dimension for better modeling capacity
-            d_model=hidden_size,
+            d_model=hidden_size * hidden_size,
             discretization='bilinear',  # Bilinear tends to be more stable
             dt_min=0.001,
             dt_max=0.1
