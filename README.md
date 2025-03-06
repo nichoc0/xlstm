@@ -1,99 +1,159 @@
-# Matrix LSTM: Cracking Financial Time Series with Math
+# Matrix LSTM (mLSTM) for Financial Time Series
 
-## Intro: What's This All About?
-Matrix LSTM is a neural network trick for predicting financial time series—like stock prices—without losing your mind over the market's chaos. It's got roots in the CS Games competition (March 2024, Québec, loud techno, good times), where I tackled some wild coding challenges and thought, "Hey, let's math up those financial patterns!" Unlike boring old LSTMs with their single-number memory, this one uses **matrix memory cells** to juggle all the messy correlations in market data. Let's dive into the equations and see what makes it tick.
+## Project Overview
+This repository implements advanced Matrix LSTM variants for financial time series prediction:
+- **S-mLSTM**: Structured Memory LSTM with state-space models for multi-scale financial modeling
+- **xLSTM**: Regular matrix-based LSTM implementation for comparison
 
-## The Math: Where the Magic Happens
+The implementation is designed for high-performance processing of financial data with special attention to market regimes, volatility dynamics, and long-term dependencies in price movements.
 
-### Old-School LSTMs: Meh
-Regular LSTMs are like that friend who can only remember one thing at a time. They use a **scalar cell state** to track sequences, which is fine for simple stuff but flops with financial data's multi-dimensional madness (prices, volumes, volatility—all tangled up). We need more firepower.
+## Mathematical Foundation
 
-### Matrix Memory: The Big Upgrade
-Matrix LSTM swaps that scalar for a **matrix memory cell**, C_t ∈ ℝ^(d×d), turning it into a powerhouse for storing connections. Here's how it updates:
+### Core Innovation: Matrix Memory Cells
+Traditional LSTMs store information in vector-based memory cells, limiting their ability to capture complex interdependencies. Matrix LSTMs replace this with matrix-valued memory cells, enabling more sophisticated pattern recognition.
 
-```
-C_t = f_t ⊙ C_(t-1) + i_t ⊙ (v_t k_t^T)
-```
+The primary mathematical innovation is:
 
-Breaking it down:
-- f_t: **Forget gate**—what to toss from last time,
-- i_t: **Input gate**—what new stuff to add,
-- v_t: **Value vector**—the info we're keeping,
-- k_t: **Key vector**—where it goes in the matrix,
-- v_t k_t^T: **Outer product**—a matrix that ties features together.
+$$\mathbf{C}_t \in \mathbb{R}^{d \times d}$$
 
-This isn't just memory—it's a web of associations, perfect for spotting patterns like a math wizard.
+Instead of:
 
-### Keeping It Stable: Normalizer State
-To avoid blowing up with crazy market swings, we've got a **normalizer state**, n_t:
+$$c_t \in \mathbb{R}^d$$
 
-```
-n_t = f_t ⊙ n_(t-1) + i_t ⊙ k_t
-```
+Where:
+- $\mathbf{C}_t$ is the matrix memory cell at time $t$
+- $d$ is the hidden dimension
 
-It tracks the keys over time, adjusted by the gates, so we don't get nonsense when pulling data out. Think of it as the math glue holding everything together.
+### Memory Update Equations
 
-### Grabbing the Goods: Query Time
-The **hidden state**, h_t, is what we actually use, and it's pulled from the matrix with a **query vector**, q_t:
+The key equations of matrix memory update are:
 
-```
-h_t = o_t ⊙ (C_t q_t) / max(|n_t^T q_t|, λ)
-```
+**1. Input & Forget Gates:**
+$$\mathbf{i}_t = \exp(\tilde{\mathbf{i}}_t - \mathbf{m}_t)$$
+$$\mathbf{f}_t = \exp(\tilde{\mathbf{f}}_t + \mathbf{m}_{t-1} - \mathbf{m}_t)$$
 
-- o_t: **Output gate**—how much to show,
-- λ: A tiny safety net (say, 1.0) to avoid dividing by zero.
+Where $\mathbf{m}_t = \max(\tilde{\mathbf{f}}_t + \mathbf{m}_{t-1}, \tilde{\mathbf{i}}_t)$ for numerical stability.
 
-This is like asking the matrix, "What's the scoop?" and getting a clean, stable answer.
+**2. Matrix Memory Update:**
+$$\mathbf{C}_t = \mathbf{f}_t \odot \mathbf{C}_{t-1} + \mathbf{i}_t \odot (\mathbf{v}_t \mathbf{k}_t^T)$$
 
-### Exponential Gating: No Gradient Drama
-Regular LSTMs use sigmoid gates that can choke the gradients. We go exponential instead:
+Where:
+- $\mathbf{v}_t \in \mathbb{R}^d$ is the value vector to be stored
+- $\mathbf{k}_t \in \mathbb{R}^d$ is the key vector for addressing
+- $\mathbf{v}_t \mathbf{k}_t^T \in \mathbb{R}^{d \times d}$ is the outer product creating associative memory
 
-```
-i_t = exp(ĩ_t - m_t),   f_t = exp(f̃_t + m_(t-1) - m_t)
-```
+**3. Key Tracking State:**
+$$\mathbf{n}_t = \mathbf{f}_t \odot \mathbf{n}_{t-1} + \mathbf{i}_t \odot \mathbf{k}_t$$
 
-with m_t = max(f̃_t + m_(t-1), ĩ_t). This keeps gates positive and gradients flowing—crucial for nailing those long-term market trends.
+**4. Query-Based Memory Retrieval:**
+$$\mathbf{h}_t = \mathbf{o}_t \odot \frac{\mathbf{C}_t \mathbf{q}_t}{\max(|\mathbf{n}_t^T \mathbf{q}_t|, \lambda)}$$
 
-## The Variants: Two Flavors of Awesome
+Where:
+- $\mathbf{q}_t \in \mathbb{R}^d$ is the query vector
+- $\mathbf{o}_t \in \mathbb{R}^d$ is the output gate
+- $\lambda$ is a stability threshold (typically 1.0)
 
-### xLSTM: The Core Beast
-**xLSTM** is the base model, rocking:
-- Matrix memory for pattern-hunting,
-- Parallel processing to chew through data fast.
+### Parallel Processing Implementation
 
-It's a solid all-rounder, but we're just getting started.
+We implement parallelized computation across the sequence dimension using cumulative operations:
 
-### S-mLSTM: Financial Superpowers
-**S-mLSTM** levels up for market mayhem:
-- **Structured State-Space Model (SSM)**: Uses discretized differential equations to catch patterns from minutes to months,
-- **Regime Detection**: Spots if the market's chill (bull), grumpy (bear), or wild (volatile),
-- **Volatility Scaling**: Tweaks memory updates when the market freaks out.
+**1. Cumulative Gates:**
+$$\mathbf{F}_{t,j} = \prod_{i=1}^j \mathbf{f}_{t,i}$$
 
-The SSM bit? It's like:
+**2. Cumulative Memory Updates:**
+$$\Delta\mathbf{C}_{t,j} = \sum_{i=1}^j \mathbf{i}_{t,i} \odot (\mathbf{v}_{t,i} \mathbf{k}_{t,i}^T)$$
 
-```
-ds(t)/dt = As(t) + Bu(t),   y(t) = Cs(t)
-```
+**3. Parallel Memory Computation:**
+$$\mathbf{C}_{t,j} = \mathbf{F}_{t,j} \odot \mathbf{C}_{t-1} + \Delta\mathbf{C}_{t,j}$$
 
-Discretized and learned with the LSTM weights—fancy, right? This thing adapts like a champ.
+This enables processing the entire sequence at once rather than step-by-step.
 
-## The Code: How It Runs
-Built in Python with PyTorch, here's the lineup:
-- **`psmlstm.py`**:
-  - `StructuredStateSpace`: SSM math in action,
-  - `ParallelSMLSTMCell`: Mixes matrix memory and SSM,
-  - `ParallelSMLSTM`: Stacks it all up with residuals.
-- **`paralstm.py`**:
-  - `FunnyMachine`: Runs the show—inputs, S-mLSTM, outputs (prices, regimes, signals),
-  - Training with **Huber Loss**, **AdamW**, and **OneCycleLR**.
+### S-mLSTM: Structured State-Space Enhancement
 
-## Using It: Quick Start
+The Structured Memory LSTM adds a state-space model layer that processes the memory matrices:
+
+**1. Continuous Dynamics:**
+$$\frac{ds(t)}{dt} = \mathbf{A}s(t) + \mathbf{B}u(t)$$
+$$y(t) = \mathbf{C}s(t) + \mathbf{D}u(t)$$
+
+**2. Discretized Implementation:**
+For the bilinear discretization method:
+$$\mathbf{A}_d = \frac{2 + \Delta t \mathbf{A}}{2 - \Delta t \mathbf{A}}$$
+$$\mathbf{B}_d = \frac{\Delta t (I + \mathbf{A}_d)}{2}\mathbf{B}$$
+
+**3. Structured Memory Mixing:**
+$$\mathbf{C}_t^{\text{mixed}} = \text{SSM}(\mathbf{C}_t) \cdot \alpha + \mathbf{C}_t \cdot (1 - \alpha)$$
+
+Where $\alpha$ is determined by market regime detection.
+
+## Implementation Details
+
+### Core Components
+
+1. **StructuredStateSpace**: 
+   - Implements discretized state-space models for multi-scale temporal dynamics
+   - Uses bilinear discretization for stability
+   - Incorporates volatility awareness
+
+2. **ParallelSMLSTMCell**:
+   - Implements matrix memory updates with parallelized sequence processing
+   - Uses exponential gating for improved gradient flow
+   - Integrates state-space memory mixing
+
+3. **ParallelExtendedSMLSTM**:
+   - Full financial prediction model with regime detection
+   - Multi-scale memory processing
+   - Generates price predictions, regime probabilities, and trading signals
+
+### Financial Adaptations
+
+1. **Market Regime Detection**:
+   - Classifies market states into 4 regimes: Bull, Bear, Sideways, Volatile
+   - Adapts memory dynamics based on detected regime
+
+2. **Volatility-Aware Processing**:
+   - Scales memory update intensity based on detected market volatility
+   - Provides more stable predictions during high-volatility periods
+
+3. **Multi-Scale Modeling**:
+   - Captures patterns from hourly to quarterly timeframes
+   - Structured state-space models with varying time constants
+
+## Training Setup
+
+The model is trained with:
+- **Huber Loss**: For robustness against financial outliers
+- **AdamW Optimizer**: With L1 regularization for weight sparsity
+- **OneCycleLR Scheduler**: For adaptive learning rate control
+- **Checkpointing**: For memory-efficient training with long sequences
+
+## Progress Log
+
+### Development Milestones:
+
+1. **Initial Implementation**:
+   - Created core matrix LSTM architecture
+   - Implemented numerical stability optimizations
+
+2. **Debugging Phase**:
+   - Fixed dimension mismatches in parallel processing
+   - Resolved shape errors in matrix operations
+   - Improved memory update operations
+
+3. **Performance Optimization**:
+   - Enhanced structured state-space model
+   - Implemented efficient memory mixing for multi-scale analysis
+
+4. **Current Status**:
+   - Model can successfully train on financial data
+   - Architecture correctly detects different market regimes
+   - First training run completed with minimal parameters
+
+## Usage
 
 ### What You Need
 - Python 3.8+, PyTorch 1.10+,
 - Extras: `numpy`, `pandas`, `yfinance`, `scikit-learn`, `ta`, `torch_optimizer`.
-
-
 
 ### Data Setup
 Defaults to MSFT stock via `yfinance`. For your own:
