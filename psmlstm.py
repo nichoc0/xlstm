@@ -329,6 +329,18 @@ class ParallelSMLSTMCell(nn.Module):
         # Handle extra dimensions for f once
         if f.dim() > 3:
             f = f.squeeze(-1)
+        
+        # Ensure i, k, f, v all have the same sequence length
+        min_seq_len = min(v.shape[1], k.shape[1], i.shape[1], f.shape[1])
+        v = v[:, :min_seq_len]
+        k = k[:, :min_seq_len]
+        i = i[:, :min_seq_len]
+        f = f[:, :min_seq_len]
+        regime_weights = regime_weights[:, :min_seq_len]
+        volatility_scale = volatility_scale[:, :min_seq_len]
+        
+        # Update actual sequence length to the trimmed length
+        actual_seq_len = min_seq_len
             
         # Calculate cumulative forget product for entire sequence
         f_cum = torch.cumprod(f, dim=1).unsqueeze(-1).unsqueeze(-1)
@@ -341,6 +353,9 @@ class ParallelSMLSTMCell(nn.Module):
         
         # Compute cumulative updates efficiently
         C_updates = torch.cumsum(update_matrices, dim=1)
+        
+        # Print debug info for tensor shapes
+        # print(f"f_cum: {f_cum.shape}, C_prev_expanded: {C_prev_expanded.shape}, C_updates: {C_updates.shape}")
         
         # Verify dimensions match
         assert C_prev_expanded.shape == C_updates.shape, f"Dimension mismatch: C_prev_expanded {C_prev_expanded.shape} vs C_updates {C_updates.shape}"
