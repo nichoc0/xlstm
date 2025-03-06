@@ -20,7 +20,7 @@ from yfinance.exceptions import YFRateLimitError  # import the specific exceptio
 
 # Configurations
 SEQ_LENGTH = 72  
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 EPOCHS = 25
 FEATURES = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
 
@@ -629,7 +629,7 @@ def main():
         """
         model = FunnyMachine(
             input_size=X_train_seq.shape[2],
-            hidden_size=32,    
+            hidden_size=16,    
             matrix_size=4,     # Increased from 2 to capture more complex patterns
             dropout=0.2
         )

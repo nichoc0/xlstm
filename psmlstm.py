@@ -71,13 +71,6 @@ class StructuredStateSpace(nn.Module):
     def forward(self, x, volatility_scale=None):
         """
         Apply structured state-space transformation.
-        
-        Args:
-            x: Input tensor [batch, seq_len, d_model]
-            volatility_scale: Optional volatility scaling factor [batch, seq_len, 1]
-        
-        Returns:
-            y: Transformed tensor [batch, seq_len, d_model]
         """
         batch, seq_len, _ = x.shape
         
@@ -88,30 +81,36 @@ class StructuredStateSpace(nn.Module):
         d = torch.exp(self.log_d)
         step = torch.exp(self.log_step)  # Adaptive step size
         
-        # Discretize continuous parameters (A, B matrices)
-        if self.discretization == 'zoh':  # Zero-order hold
-            # A_discrete = exp(A*dt) = exp(lambda*dt) for diagonal A
-            a_discrete = torch.exp(lambda_real.unsqueeze(1) * step.unsqueeze(0))
-            
-            # B_discrete for ZOH: (exp(A*dt) - I)A^{-1}B
-            b_discrete = (a_discrete - 1.0) / lambda_real.unsqueeze(1) * b
-            
-        elif self.discretization == 'bilinear':  # Tustin's/bilinear approximation
-            # A_discrete = (2 + dt*A)/(2 - dt*A)
-            a_discrete = (2.0 + step.unsqueeze(0) * lambda_real.unsqueeze(1)) / \
-                         (2.0 - step.unsqueeze(0) * lambda_real.unsqueeze(1))
-                         
-            # B_discrete for bilinear: dt(I + A_discrete)B / 2
-            b_discrete = step.unsqueeze(0) * (torch.ones_like(a_discrete) + a_discrete) * b / 2.0
+        # First compute discretized parameters with correct dimensions
+        step_expanded = step.unsqueeze(0)  # [1, d_state]
+        lambda_expanded = lambda_real.unsqueeze(1)  # [d_state, 1]
         
-        # Handle shapes for SSM operation
-        a_discrete = a_discrete.expand(batch, self.d_state, seq_len)
-        b_discrete = b_discrete.expand(batch, self.d_state, 1)
+        if self.discretization == 'zoh':
+            # Zero-order hold discretization
+            a_discrete = torch.exp(lambda_expanded * step_expanded)  # [d_state, d_state]
+            b_discrete = (a_discrete - 1.0) / lambda_expanded * b
+            
+        elif self.discretization == 'bilinear':
+            # Bilinear discretization (better for financial data)
+            a_discrete = (2.0 + step_expanded * lambda_expanded) / (2.0 - step_expanded * lambda_expanded)
+            b_discrete = step_expanded * (torch.ones_like(a_discrete) + a_discrete) * b / 2.0
         
-        # Transposed for more efficient scanning
+        # Slice or repeat to match sequence length
+        if a_discrete.shape[1] > seq_len:
+            a_discrete = a_discrete[:, :seq_len]
+        else:
+            a_discrete = a_discrete.repeat(1, math.ceil(seq_len / a_discrete.shape[1]))[:, :seq_len]
+        
+        # Now expand properly for batch dimension
+        a_discrete = a_discrete.unsqueeze(0).expand(batch, -1, -1)  # [batch, d_state, seq_len]
+        
+        # Fix b_discrete shape
+        b_discrete = b_discrete.reshape(self.d_state, 1).unsqueeze(0).expand(batch, -1, -1)  # [batch, d_state, 1]
+        
+        # Rest of the method continues as before...
         a_discrete = a_discrete.transpose(1, 2)  # [batch, seq_len, d_state]
         x_proj = x  # Projection happens in the main LSTM cell
-        
+            
         # Initial state h(0) = 0
         h = torch.zeros(batch, self.d_state, device=x.device)
         
