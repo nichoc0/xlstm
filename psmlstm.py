@@ -96,7 +96,7 @@ class ParallelSMLSTMCell(nn.Module):
         # Structured state-space memory model for each matrix dimension
         self.ssm = StructuredStateSpace(
             d_state=hidden_size,       # Reduced from hidden_size*2 to match properly
-            d_model=1,                 # Simplified to scalar model dimension
+            d_model=hidden_size,                 # Simplified to scalar model dimension
             discretization='bilinear',
             dt_min=0.001,
             dt_max=0.1
