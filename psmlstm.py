@@ -234,22 +234,23 @@ class ParallelSMLSTMCell(nn.Module):
         return scalar_vol
     
     def stabilize_gates(self, i_tilde, f_tilde, m_prev):
-            batch_size, seq_len = i_tilde.shape[0], i_tilde.shape[1]
-            # Only add one unsqueeze to make it [batch, 1, 1]
-            m_prev_exp = m_prev.unsqueeze(1).clamp(-100, 100)  # Shape [batch, 1]
-            
-            # Add the final dimension here if needed
-            if m_prev.dim() == 2 and m_prev.shape[1] == 1:
-                m_prev_exp = m_prev_exp.unsqueeze(-1)  # Now shape [batch, 1, 1]
-            
-            # Compute max term for LogSumExp stability with explicit broadcasting
-            m_t = torch.maximum(f_tilde + m_prev_exp, i_tilde)
-            
-            # Stable computation with clipping for financial data extremes
-            i = torch.exp(torch.clamp(i_tilde - m_t, -15.0, 15.0))
-            f = torch.exp(torch.clamp(f_tilde + m_prev_exp - m_t, -15.0, 15.0))
-            
-            return i, f, m_t
+        batch_size, seq_len = i_tilde.shape[0], i_tilde.shape[1]
+        
+        # Ensure m_prev has the right shape for broadcasting
+        if m_prev.dim() == 1:
+            m_prev = m_prev.unsqueeze(1)  # [batch, 1]
+        
+        # Reshape m_prev for proper broadcasting
+        m_prev_exp = m_prev.unsqueeze(1).expand(batch_size, seq_len, 1).clamp(-100, 100)
+        
+        # Compute max term for LogSumExp stability
+        m_t = torch.maximum(f_tilde, m_prev_exp + f_tilde)
+        
+        # Stable computation with clipping for financial data extremes
+        i = torch.exp(torch.clamp(i_tilde - m_t, -15.0, 15.0))
+        f = torch.exp(torch.clamp(f_tilde + m_prev_exp - m_t, -15.0, 15.0))
+        
+        return i, f, m_t
     def store_key_value(self, key, value, i):
         """
         Compute key-value storage via outer product with improved numerical stability.
