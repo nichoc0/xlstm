@@ -13,64 +13,58 @@ class StructuredStateSpace(nn.Module):
         self.discretization = discretization
         
         self.log_lambda_real = nn.Parameter(torch.linspace(math.log(dt_min), math.log(dt_max), d_state))
-        self.log_b = nn.Parameter(torch.randn(d_state, d_model).uniform_(-0.5, 0.5))
-        self.c = nn.Parameter(torch.randn(d_model, d_state) / math.sqrt(d_state))
-        self.log_d = nn.Parameter(torch.zeros(d_model))
+        self.log_b = nn.Parameter(torch.randn(d_state, 1).uniform_(-0.5, 0.5))  # Changed to d_state x 1
+        self.c = nn.Parameter(torch.randn(1, d_state) / math.sqrt(d_state))     # Changed to 1 x d_state
+        self.log_d = nn.Parameter(torch.zeros(1))                               # Changed to scalar
         
-        market_timescales = torch.tensor([1.0/24.0, 1.0, 5.0, 21.0, 63.0])
-        if len(market_timescales) > d_state:
-            market_timescales = market_timescales[:d_state]
-        elif len(market_timescales) < d_state:
-            extra = torch.linspace(market_timescales[-1], market_timescales[-1] * 3, d_state - len(market_timescales))
-            market_timescales = torch.cat([market_timescales, extra])
-        self.register_buffer('market_timescales', market_timescales)
-        self.log_step = nn.Parameter(torch.log(market_timescales.clone()))
+        # Fix: Use a single step size parameter now
+        self.log_step = nn.Parameter(torch.tensor(math.log(dt_min)))
         
-        # Fix: volatility_gate should match d_state, not d_model
-        self.volatility_gate = nn.Parameter(torch.ones(d_state))  # Changed from d_model
-        
+        self.volatility_gate = nn.Parameter(torch.ones(d_state))
         self.alpha = nn.Parameter(torch.tensor(0.7))
         self.layer_norm = nn.LayerNorm(d_state)
 
     def forward(self, x, volatility_scale=None):
         batch, seq_len, _ = x.shape
-        lambda_real = -torch.exp(self.log_lambda_real)
-        b = torch.exp(self.log_b)
-        c = self.c
-        d = torch.exp(self.log_d)
-        step = torch.exp(self.log_step)
+        lambda_real = -torch.exp(self.log_lambda_real)  # [d_state]
+        b = torch.exp(self.log_b)                       # [d_state, 1]
+        c = self.c                                      # [1, d_state]
+        d = torch.exp(self.log_d)                       # [1]
+        step = torch.exp(self.log_step)                 # Scalar
         
-        step_expanded = step.unsqueeze(0)
-        lambda_expanded = lambda_real.unsqueeze(1)
-        
+        # Simplify the discretization calculation
         if self.discretization == 'zoh':
-            a_discrete = torch.exp(lambda_expanded * step_expanded)
-            b_discrete = ((a_discrete - 1.0) / lambda_expanded) * b
+            a_discrete = torch.exp(lambda_real * step)                      # [d_state]
+            b_discrete = (a_discrete - 1.0) / lambda_real * b.squeeze(-1)   # [d_state]
         elif self.discretization == 'bilinear':
-            a_discrete = (2.0 + step_expanded * lambda_expanded) / (2.0 - step_expanded * lambda_expanded)
-            b_discrete = step_expanded * (torch.ones_like(a_discrete) + a_discrete) * b / 2.0
+            a_discrete = (2.0 + step * lambda_real) / (2.0 - step * lambda_real)  # [d_state]
+            b_discrete = step * (torch.ones_like(a_discrete) + a_discrete) * b.squeeze(-1) / 2.0  # [d_state]
         
-        if a_discrete.shape[1] > seq_len:
-            a_discrete = a_discrete[:, :seq_len]
-        else:
-            a_discrete = a_discrete.repeat(1, math.ceil(seq_len / a_discrete.shape[1]))[:, :seq_len]
-        
-        a_discrete = a_discrete.unsqueeze(0).expand(batch, -1, -1).transpose(1, 2)
-        b_discrete = b_discrete.unsqueeze(0).expand(batch, -1, -1)
-        x_proj = x
-        h = torch.zeros(batch, self.d_state, device=x.device)
+        # Initialize the hidden state
+        h = torch.zeros(batch, self.d_state, device=x.device)  # [batch, d_state]
         outputs = []
+        
+        # Simplify the recurrent loop
         for t in range(seq_len):
-            h = torch.bmm(a_discrete[:, t, :].unsqueeze(1), h.unsqueeze(2)).squeeze(2) + \
-                torch.matmul(b_discrete, x_proj[:, t, :].unsqueeze(-1)).squeeze(-1)
+            # State update: h = A*h + B*x
+            h = a_discrete.unsqueeze(0) * h + b_discrete.unsqueeze(0) * x[:, t, :].mean(dim=1, keepdim=True)
+            
+            # Apply layer normalization
             h = self.layer_norm(h)
+            
+            # Apply volatility scaling if provided
             if volatility_scale is not None:
                 vol_influence = torch.sigmoid(self.volatility_gate) * volatility_scale[:, t]
-                h = h * (1.0 / (1.0 + vol_influence))  # Now both are [batch, d_state]
-            y = torch.matmul(h, c.transpose(0, 1)) + d * x_proj[:, t, :]
+                h = h * (1.0 / (1.0 + vol_influence))
+            
+            # Output calculation: y = C*h + D*x
+            y = torch.matmul(h.unsqueeze(1), c.transpose(0, 1)).squeeze(1) + d * x[:, t, :]
             outputs.append(y)
+        
         y = torch.stack(outputs, dim=1)
         alpha = torch.sigmoid(self.alpha)
+        
+        # Residual connection
         return alpha * x + (1 - alpha) * y
 
 
@@ -101,9 +95,9 @@ class ParallelSMLSTMCell(nn.Module):
         
         # Structured state-space memory model for each matrix dimension
         self.ssm = StructuredStateSpace(
-            d_state=hidden_size*2,  # Larger state dimension for better modeling capacity
-            d_model=hidden_size * hidden_size,
-            discretization='bilinear',  # Bilinear tends to be more stable
+            d_state=hidden_size,       # Reduced from hidden_size*2 to match properly
+            d_model=1,                 # Simplified to scalar model dimension
+            discretization='bilinear',
             dt_min=0.001,
             dt_max=0.1
         )
@@ -235,14 +229,17 @@ class ParallelSMLSTMCell(nn.Module):
         """
         batch_size, seq_len, d, _ = C_t.shape
         
-        # Reshape memory for SSM processing
-        C_flat = C_t.reshape(batch_size, seq_len, -1)
+        # Process each hidden dimension separately to avoid size mismatches
+        C_mixed = torch.zeros_like(C_t)
         
-        # Apply SSM with volatility awareness
-        C_mixed = self.ssm(C_flat, volatility_scale)
-        
-        # Reshape back to memory matrix
-        C_mixed = C_mixed.reshape(batch_size, seq_len, d, d)
+        # Process each row of the memory matrix separately to avoid dimension issues
+        for i in range(d):
+            # Extract feature dimension to process
+            C_row = C_t[:, :, i, :]
+            # Apply SSM processing
+            C_row_mixed = self.ssm(C_row, volatility_scale)
+            # Store back in result tensor
+            C_mixed[:, :, i, :] = C_row_mixed
         
         # Final memory is adaptively mixed using regime weights
         # Different regimes can rely more on raw vs. structured memory
@@ -273,34 +270,37 @@ class ParallelSMLSTMCell(nn.Module):
         volatility_scale = volatility_scale[:, :min_seq_len]
         
         # Update actual sequence length to the trimmed length
-        actual_seq_len = min_seq_len
-            
-        # Calculate cumulative forget product for entire sequence
-        f_cum = torch.cumprod(f, dim=1).unsqueeze(-1).unsqueeze(-1)
+        seq_len = min_seq_len
         
-        # Compute key-value outer products for the entire sequence
-        update_matrices = self.store_key_value(k, v, i)
+        # Calculate cumulative forget product
+        f_cum = torch.cumprod(f, dim=1).unsqueeze(-1).unsqueeze(-1)  # [batch, seq, 1, 1]
         
-        # CRITICAL FIX: Ensure update_matrices has the correct sequence length
-        if update_matrices.shape[1] != actual_seq_len:
-            # This shouldn't happen but just in case - slice to match
-            update_matrices = update_matrices[:, :actual_seq_len]
+        # Check shape of f_cum, should be [batch, seq_len, 1, 1]
+        # If there's an extra dimension, squeeze it
+        if f_cum.dim() > 4:
+            f_cum = f_cum.squeeze(-1)  # Remove the extra dimension
         
-        # Expand C_prev for broadcasting - ensure correct sequence length
-        C_prev_expanded = C_prev.unsqueeze(1).expand(-1, actual_seq_len, -1, -1)
+        # Compute key-value outer products
+        update_matrices = self.store_key_value(k, v, i)  # [batch, seq, d, d]
+        
+        # Ensure update_matrices has correct sequence length
+        if update_matrices.shape[1] != min_seq_len:
+            update_matrices = update_matrices[:, :min_seq_len]
         
         # Compute cumulative updates efficiently
-        C_updates = torch.cumsum(update_matrices, dim=1)
+        C_updates = torch.cumsum(update_matrices, dim=1)  # [batch, seq, d, d]
         
-        # Print debug info for shape checking
-        # print(f"f_cum: {f_cum.shape}, C_prev_expanded: {C_prev_expanded.shape}, C_updates: {C_updates.shape}")
+        # Expand C_prev for broadcasting - CRITICAL FIX: only expand to min_seq_len
+        C_prev_expanded = C_prev.unsqueeze(1).expand(-1, min_seq_len, -1, -1)
         
-        # Double-check dimensions match before operations
-        assert f_cum.shape[1] == C_prev_expanded.shape[1], f"Sequence length mismatch: f_cum {f_cum.shape[1]} vs C_prev_expanded {C_prev_expanded.shape[1]}"
-        assert C_prev_expanded.shape == C_updates.shape, f"Shape mismatch: C_prev_expanded {C_prev_expanded.shape} vs C_updates {C_updates.shape}"
+        # Debug shapes
+        # print(f"C_prev_expanded shape: {C_prev_expanded.shape}, f_cum shape: {f_cum.shape}")
+        
+        # Before expanding, ensure f_cum has compatible dimensions with C_prev_expanded
+        f_cum_expanded = f_cum.expand(batch_size, min_seq_len, 1, 1)  # Explicitly define expansion
         
         # Apply forget gates to previous memory and add updates
-        C_t = f_cum * C_prev_expanded + C_updates
+        C_t = f_cum_expanded * C_prev_expanded + C_updates
         
         # Apply structured mixing and normalization
         C_t = self.apply_structured_memory_mixing(C_t, regime_weights, volatility_scale)
@@ -340,24 +340,22 @@ class ParallelSMLSTMCell(nn.Module):
         actual_seq_len = C_t.shape[1]
         
         # Key tracking update (for normalizing query matching)
-        # Use actual_seq_len from C_t to ensure dimension alignment
         n_prev_expanded = n_prev.unsqueeze(1).expand(-1, actual_seq_len, -1)
         
-        # Ensure i and k have the same sequence length as C_t
-        i_actual = i[:, :actual_seq_len]
+        # Ensure all tensors have the same sequence length as C_t
+        q_actual = q[:, :actual_seq_len]
         k_actual = k[:, :actual_seq_len]
-        i_k_product = i_actual * k_actual
-        
-        # Compute f_cum with actual sequence length
+        i_actual = i[:, :actual_seq_len]
         f_actual = f[:, :actual_seq_len]
-        f_cum = torch.cumprod(f_actual, dim=1)
+        o_actual = o[:, :actual_seq_len]
         
-        # Now combine with matching dimensions
+        i_k_product = i_actual * k_actual
+        f_cum = torch.cumprod(f_actual, dim=1)
         n_t = torch.cumsum(i_k_product, dim=1) + f_cum * n_prev_expanded
         
         # Query matching with numerical stability
-        h_tilde = torch.einsum('bsde,bse->bsd', C_t, q[:, :actual_seq_len])
-        q_n_dot = torch.sum(n_t * q[:, :actual_seq_len], dim=-1)
+        h_tilde = torch.einsum('bsde,bse->bsd', C_t, q_actual)
+        q_n_dot = torch.sum(n_t * q_actual, dim=-1)
         
         # Stable denominator with market-specific threshold
         denominator = torch.maximum(
@@ -369,7 +367,7 @@ class ParallelSMLSTMCell(nn.Module):
         h_tilde = h_tilde / denominator
         
         # Output computation with regime-aware gating
-        h_t = o[:, :actual_seq_len] * h_tilde
+        h_t = o_actual * h_tilde
         
         # Final states for next step
         final_state = (C_t[:, -1], n_t[:, -1], m_t[:, -1])
@@ -463,36 +461,23 @@ class ParallelSMLSTM(nn.Module):
 
 
 class ParallelMLSTMBlock(nn.Module):
-    """
-    Financial-optimized mLSTM block with market regime awareness.
-    """
     def __init__(self, input_dim, expanded_dim=None, num_layers=2, dropout=0.2, 
                  expansion_factor=4, lstm_class=ParallelSMLSTM, matrix_size=4):
         super().__init__()
         expanded_dim = expanded_dim or input_dim * expansion_factor
-        
-        # Financial data benefit from adaptive normalization
         self.layer_norm = nn.LayerNorm(input_dim)
-        
-        # Dimension expansion with GELU (better gradient properties for financial data)
         self.up_proj = nn.Sequential(
             nn.Linear(input_dim, expanded_dim),
             nn.GELU()
         )
-        
-        # Structured mLSTM core
         self.mlstm = lstm_class(
             expanded_dim, 
-            expanded_dim // 2,  # Reduce internal dimension for efficiency
+            expanded_dim // 2,
             matrix_size=matrix_size,
             num_layers=num_layers, 
             dropout=dropout
         )
-        
-        # Financial-aware projection back to input dimension
-        self.down_proj = nn.Linear(expanded_dim, input_dim)
-        
-        # Learnable skip connection scaling
+        self.down_proj = nn.Linear(expanded_dim // 2, input_dim)  # Corrected
         self.skip_scale = nn.Parameter(torch.ones(1))
 
     def forward(self, x):
