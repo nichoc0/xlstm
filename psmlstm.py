@@ -22,15 +22,12 @@ class StructuredStateSpace(nn.Module):
         self.log_lambda_real = nn.Parameter(torch.linspace(math.log(dt_min), math.log(dt_max), d_state))
         
         # B: input projection (d_state × 1)
-        self.log_b = nn.Parameter(torch.randn(d_state, 1).uniform_(-0.5, 0.5))
-        
+        self.log_b = nn.Parameter(torch.randn(d_state, d_model).uniform_(-0.5, 0.5))        
         # C: output projection (1 × d_state)
         init_c = torch.randn(1, d_state) / math.sqrt(d_state)
-        self.c = nn.Parameter(init_c)
-        
+        self.c = nn.Parameter(torch.randn(d_model, d_state) / math.sqrt(d_state))        
         # D: skip connection (scalar)
-        self.log_d = nn.Parameter(torch.zeros(1))
-        
+        self.log_d = nn.Parameter(torch.zeros(d_model))        
         # Trading-specific timescales (daily, weekly, monthly, quarterly)
         # Represented as step sizes for discretization
         market_timescales = torch.tensor([
@@ -60,8 +57,7 @@ class StructuredStateSpace(nn.Module):
         self.log_step = nn.Parameter(torch.log(market_timescales.clone()))
         
         # Volatility awareness parameters (scale hidden states based on volatility)
-        self.volatility_gate = nn.Parameter(torch.ones(d_model))
-        
+        self.volatility_gate = nn.Parameter(torch.ones(d_model))        
         # Learnable mixing coefficient for residual connection
         self.alpha = nn.Parameter(torch.tensor(0.7))
         
@@ -86,9 +82,8 @@ class StructuredStateSpace(nn.Module):
         lambda_expanded = lambda_real.unsqueeze(1)  # [d_state, 1]
         
         if self.discretization == 'zoh':
-            # Zero-order hold discretization
-            a_discrete = torch.exp(lambda_expanded * step_expanded)  # [d_state, d_state]
-            b_discrete = (a_discrete - 1.0) / lambda_expanded * b
+            a_discrete = torch.exp(lambda_expanded * step_expanded)
+            b_discrete = ((a_discrete - 1.0) / lambda_expanded) * b
             
         elif self.discretization == 'bilinear':
             # Bilinear discretization (better for financial data)
@@ -101,48 +96,22 @@ class StructuredStateSpace(nn.Module):
         else:
             a_discrete = a_discrete.repeat(1, math.ceil(seq_len / a_discrete.shape[1]))[:, :seq_len]
         
-        # Now expand properly for batch dimension
-        a_discrete = a_discrete.unsqueeze(0).expand(batch, -1, -1)  # [batch, d_state, seq_len]
-        
-        # Fix b_discrete shape
-        b_discrete = b_discrete.reshape(self.d_state, 1).unsqueeze(0).expand(batch, -1, -1)  # [batch, d_state, 1]
-        
-        # Rest of the method continues as before...
-        a_discrete = a_discrete.transpose(1, 2)  # [batch, seq_len, d_state]
-        x_proj = x  # Projection happens in the main LSTM cell
-            
-        # Initial state h(0) = 0
+        a_discrete = a_discrete[:, :seq_len].unsqueeze(0).expand(batch, -1, -1).transpose(1, 2)
+        b_discrete = b_discrete.unsqueeze(0).expand(batch, -1, -1)
+        x_proj = x
         h = torch.zeros(batch, self.d_state, device=x.device)
-        
-        # Container for outputs
         outputs = []
-        
-        # Scan through sequence (can be parallelized with custom CUDA kernels, but this is clearer)
         for t in range(seq_len):
-            # SSM recurrence: h(t+1) = Ah(t) + Bx(t)
             h = torch.bmm(a_discrete[:, t, :].unsqueeze(1), h.unsqueeze(2)).squeeze(2) + \
-                (b_discrete.squeeze(2) * x_proj[:, t, :]).sum(dim=1)
-            
-            # Apply normalization for stability
+                torch.matmul(b_discrete, x_proj[:, t, :].unsqueeze(-1)).squeeze(-1)
             h = self.layer_norm(h)
-            
-            # Volatility-aware scaling (if provided)
             if volatility_scale is not None:
-                # Apply learned gate to volatility influence
                 vol_influence = torch.sigmoid(self.volatility_gate) * volatility_scale[:, t]
-                # Scale state inversely with volatility (higher volatility → more cautious state)
                 h = h * (1.0 / (1.0 + vol_influence))
-                
-            # SSM output: y(t) = Ch(t) + Dx(t)
-            y = torch.matmul(h.unsqueeze(1), c.transpose(0, 1)).squeeze(1) + d * x_proj[:, t, :]
+            y = torch.matmul(h, c.transpose(0, 1)) + d * x_proj[:, t, :]
             outputs.append(y)
-            
-        # Stack outputs along sequence dimension
-        y = torch.stack(outputs, dim=1)  # [batch, seq_len, d_model]
-        
-        # Learned residual mixing with input
-        alpha = torch.sigmoid(self.alpha)  # Constrain to [0, 1]
-        
+        y = torch.stack(outputs, dim=1)
+        alpha = torch.sigmoid(self.alpha)
         return alpha * x + (1 - alpha) * y
 
 
