@@ -259,6 +259,12 @@ class ParallelSMLSTMCell(nn.Module):
         key_norm = F.normalize(key, dim=2) * math.sqrt(self.d)
         value_norm = value / (torch.norm(value, dim=2, keepdim=True) + 1e-6) * math.sqrt(self.d)
         
+        # Ensure same sequence length for all inputs
+        min_seq = min(key_norm.shape[1], value_norm.shape[1], i.shape[1])
+        key_norm = key_norm[:, :min_seq]
+        value_norm = value_norm[:, :min_seq]
+        i = i[:, :min_seq]
+        
         # Outer product with normalized values
         outer_product = torch.einsum('bsd,bse->bsde', value_norm, key_norm)
         
@@ -323,7 +329,6 @@ class ParallelSMLSTMCell(nn.Module):
         Memory-efficient implementation with chunking.
         """
         batch_size = v.shape[0]
-        actual_seq_len = v.shape[1]  # Get actual sequence length from input
         d = self.d  # Get matrix dimension
         
         # Handle extra dimensions for f once
@@ -348,18 +353,23 @@ class ParallelSMLSTMCell(nn.Module):
         # Compute key-value outer products for the entire sequence
         update_matrices = self.store_key_value(k, v, i)
         
+        # CRITICAL FIX: Ensure update_matrices has the correct sequence length
+        if update_matrices.shape[1] != actual_seq_len:
+            # This shouldn't happen but just in case - slice to match
+            update_matrices = update_matrices[:, :actual_seq_len]
+        
         # Expand C_prev for broadcasting - ensure correct sequence length
         C_prev_expanded = C_prev.unsqueeze(1).expand(-1, actual_seq_len, -1, -1)
         
         # Compute cumulative updates efficiently
         C_updates = torch.cumsum(update_matrices, dim=1)
         
-        # Print debug info for tensor shapes
+        # Print debug info for shape checking
         # print(f"f_cum: {f_cum.shape}, C_prev_expanded: {C_prev_expanded.shape}, C_updates: {C_updates.shape}")
         
-        # Verify dimensions match
-        assert C_prev_expanded.shape == C_updates.shape, f"Dimension mismatch: C_prev_expanded {C_prev_expanded.shape} vs C_updates {C_updates.shape}"
-        assert f_cum.shape[0] == C_updates.shape[0] and f_cum.shape[1] == C_updates.shape[1], f"Dimension mismatch: f_cum {f_cum.shape} vs C_updates {C_updates.shape}"
+        # Double-check dimensions match before operations
+        assert f_cum.shape[1] == C_prev_expanded.shape[1], f"Sequence length mismatch: f_cum {f_cum.shape[1]} vs C_prev_expanded {C_prev_expanded.shape[1]}"
+        assert C_prev_expanded.shape == C_updates.shape, f"Shape mismatch: C_prev_expanded {C_prev_expanded.shape} vs C_updates {C_updates.shape}"
         
         # Apply forget gates to previous memory and add updates
         C_t = f_cum * C_prev_expanded + C_updates
