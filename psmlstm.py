@@ -380,21 +380,31 @@ class ParallelSMLSTMCell(nn.Module):
         i = i.view(batch_size, seq_len, 1)
         f = f.view(batch_size, seq_len, 1)
         
-        # Memory update with structured state-space mixing - pass actual seq_len
+        # Memory update with structured state-space mixing
         C_t = self.parallel_memory_update(v, k, i, f, C_prev, seq_len, regime_weights, volatility_scale)
         
+        # Get actual sequence length from C_t for consistency
+        actual_seq_len = C_t.shape[1]
+        
         # Key tracking update (for normalizing query matching)
-        n_prev_expanded = n_prev.unsqueeze(1).expand(-1, seq_len, -1)
-        i_k_product = i * k
-        f_cum = torch.cumprod(f, dim=1)
+        # Use actual_seq_len from C_t to ensure dimension alignment
+        n_prev_expanded = n_prev.unsqueeze(1).expand(-1, actual_seq_len, -1)
+        
+        # Ensure i and k have the same sequence length as C_t
+        i_actual = i[:, :actual_seq_len]
+        k_actual = k[:, :actual_seq_len]
+        i_k_product = i_actual * k_actual
+        
+        # Compute f_cum with actual sequence length
+        f_actual = f[:, :actual_seq_len]
+        f_cum = torch.cumprod(f_actual, dim=1)
+        
+        # Now combine with matching dimensions
         n_t = torch.cumsum(i_k_product, dim=1) + f_cum * n_prev_expanded
         
-        # Ensure consistent dimensions for remaining operations
-        seq_len_out = C_t.shape[1]  # Use actual output sequence length
-        
         # Query matching with numerical stability
-        h_tilde = torch.einsum('bsde,bse->bsd', C_t, q[:,:seq_len_out])
-        q_n_dot = torch.sum(n_t[:,:seq_len_out] * q[:,:seq_len_out], dim=-1)
+        h_tilde = torch.einsum('bsde,bse->bsd', C_t, q[:, :actual_seq_len])
+        q_n_dot = torch.sum(n_t * q[:, :actual_seq_len], dim=-1)
         
         # Stable denominator with market-specific threshold
         denominator = torch.maximum(
@@ -406,7 +416,7 @@ class ParallelSMLSTMCell(nn.Module):
         h_tilde = h_tilde / denominator
         
         # Output computation with regime-aware gating
-        h_t = o[:,:seq_len_out] * h_tilde
+        h_t = o[:, :actual_seq_len] * h_tilde
         
         # Final states for next step
         final_state = (C_t[:, -1], n_t[:, -1], m_t[:, -1])
