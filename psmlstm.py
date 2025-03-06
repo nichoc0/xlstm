@@ -323,9 +323,10 @@ class ParallelSMLSTMCell(nn.Module):
         Memory-efficient implementation with chunking.
         """
         batch_size = v.shape[0]
-        chunk_size = 16  # Process sequence in smaller chunks
-        C_t = None
-        update_sum = None  # Track the cumulative sum across chunks
+        d = self.d  # Get matrix dimension
+        
+        # Process full sequence at once for better reliability
+        # Instead of complex chunking that's causing dimension issues
         
         # Handle extra dimensions for f once
         if f.dim() > 3:
@@ -334,42 +335,19 @@ class ParallelSMLSTMCell(nn.Module):
         # Calculate cumulative forget product for entire sequence
         f_cum = torch.cumprod(f, dim=1).unsqueeze(-1).unsqueeze(-1)
         
-        # Process in memory-efficient chunks
-        for start_idx in range(0, seq_len, chunk_size):
-            end_idx = min(start_idx + chunk_size, seq_len)
-            chunk_len = end_idx - start_idx
-            
-            # Get current chunk data
-            chunk_v = v[:, start_idx:end_idx]
-            chunk_k = k[:, start_idx:end_idx]
-            chunk_i = i[:, start_idx:end_idx]
-            chunk_f_cum = f_cum[:, start_idx:end_idx]
-            
-            # Process this chunk
-            chunk_update = self.store_key_value(chunk_k, chunk_v, chunk_i)
-            
-            # Expand previous state for this chunk
-            C_prev_chunk = C_prev.unsqueeze(1).expand(-1, chunk_len, -1, -1)
-            
-            # Memory update for this chunk
-            if start_idx == 0:
-                # First chunk - direct calculation
-                chunk_C_t = chunk_f_cum * C_prev_chunk + torch.cumsum(chunk_update, dim=1)
-                update_sum = chunk_update.sum(dim=1, keepdim=True)
-                C_t = chunk_C_t
-            else:
-                # Later chunks - include previous accumulated updates
-                prev_sum = update_sum.unsqueeze(-1)  # Shape [batch, 1, 1, 1]
-                chunk_C_updates = torch.cumsum(chunk_update, dim=1) + prev_sum
-                chunk_C_t = chunk_f_cum * C_prev_chunk + chunk_C_updates
-                
-                # Update running sum for next chunk
-                update_sum = update_sum + chunk_update.sum(dim=1, keepdim=True)
-                
-                # Concatenate with previous results
-                C_t = torch.cat([C_t, chunk_C_t], dim=1)
+        # Compute key-value outer products for the entire sequence
+        update_matrices = self.store_key_value(k, v, i)
         
-        # Apply structured mixing and normalization to the full tensor
+        # Expand C_prev for broadcasting
+        C_prev_expanded = C_prev.unsqueeze(1).expand(-1, seq_len, -1, -1)
+        
+        # Compute cumulative updates efficiently
+        C_updates = torch.cumsum(update_matrices, dim=1)
+        
+        # Apply forget gates to previous memory and add updates
+        C_t = f_cum * C_prev_expanded + C_updates
+        
+        # Apply structured mixing and normalization
         C_t = self.apply_structured_memory_mixing(C_t, regime_weights, volatility_scale)
         
         # Final normalization for stability
