@@ -20,7 +20,7 @@ from yfinance.exceptions import YFRateLimitError  # import the specific exceptio
 
 # Configurations
 SEQ_LENGTH = 72  
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 EPOCHS = 25
 FEATURES = ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']
 
