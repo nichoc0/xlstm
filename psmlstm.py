@@ -323,10 +323,8 @@ class ParallelSMLSTMCell(nn.Module):
         Memory-efficient implementation with chunking.
         """
         batch_size = v.shape[0]
+        actual_seq_len = v.shape[1]  # Get actual sequence length from input
         d = self.d  # Get matrix dimension
-        
-        # Process full sequence at once for better reliability
-        # Instead of complex chunking that's causing dimension issues
         
         # Handle extra dimensions for f once
         if f.dim() > 3:
@@ -338,11 +336,15 @@ class ParallelSMLSTMCell(nn.Module):
         # Compute key-value outer products for the entire sequence
         update_matrices = self.store_key_value(k, v, i)
         
-        # Expand C_prev for broadcasting
-        C_prev_expanded = C_prev.unsqueeze(1).expand(-1, seq_len, -1, -1)
+        # Expand C_prev for broadcasting - ensure correct sequence length
+        C_prev_expanded = C_prev.unsqueeze(1).expand(-1, actual_seq_len, -1, -1)
         
         # Compute cumulative updates efficiently
         C_updates = torch.cumsum(update_matrices, dim=1)
+        
+        # Verify dimensions match
+        assert C_prev_expanded.shape == C_updates.shape, f"Dimension mismatch: C_prev_expanded {C_prev_expanded.shape} vs C_updates {C_updates.shape}"
+        assert f_cum.shape[0] == C_updates.shape[0] and f_cum.shape[1] == C_updates.shape[1], f"Dimension mismatch: f_cum {f_cum.shape} vs C_updates {C_updates.shape}"
         
         # Apply forget gates to previous memory and add updates
         C_t = f_cum * C_prev_expanded + C_updates
@@ -378,7 +380,7 @@ class ParallelSMLSTMCell(nn.Module):
         i = i.view(batch_size, seq_len, 1)
         f = f.view(batch_size, seq_len, 1)
         
-        # Memory update with structured state-space mixing
+        # Memory update with structured state-space mixing - pass actual seq_len
         C_t = self.parallel_memory_update(v, k, i, f, C_prev, seq_len, regime_weights, volatility_scale)
         
         # Key tracking update (for normalizing query matching)
@@ -387,9 +389,12 @@ class ParallelSMLSTMCell(nn.Module):
         f_cum = torch.cumprod(f, dim=1)
         n_t = torch.cumsum(i_k_product, dim=1) + f_cum * n_prev_expanded
         
+        # Ensure consistent dimensions for remaining operations
+        seq_len_out = C_t.shape[1]  # Use actual output sequence length
+        
         # Query matching with numerical stability
-        h_tilde = torch.einsum('bsde,bse->bsd', C_t, q)
-        q_n_dot = torch.sum(n_t * q, dim=-1)
+        h_tilde = torch.einsum('bsde,bse->bsd', C_t, q[:,:seq_len_out])
+        q_n_dot = torch.sum(n_t[:,:seq_len_out] * q[:,:seq_len_out], dim=-1)
         
         # Stable denominator with market-specific threshold
         denominator = torch.maximum(
@@ -401,7 +406,7 @@ class ParallelSMLSTMCell(nn.Module):
         h_tilde = h_tilde / denominator
         
         # Output computation with regime-aware gating
-        h_t = o * h_tilde
+        h_t = o[:,:seq_len_out] * h_tilde
         
         # Final states for next step
         final_state = (C_t[:, -1], n_t[:, -1], m_t[:, -1])
