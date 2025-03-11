@@ -485,3 +485,137 @@ The `main.py` script represents a sophisticated implementation of modern deep le
 6. Memory-efficient implementation for long sequences
 
 These elements combine to create a powerful framework for high-performance financial forecasting using Scalar-Matrix LSTM architectures.
+
+
+
+
+# TPU-Accelerated Scalar-Matrix LSTM Training Results Analysis
+
+This document analyzes the training results of the Scalar-Matrix LSTM model on financial time series data, focusing on the performance metrics and convergence patterns observed during training.
+
+## Overview
+
+The output shows training across 5 folds of cross-validation, each using time series data with increasing temporal range. The model contains approximately 1.93 million parameters and processes 26 financial features.
+
+## Convergence Analysis
+
+### Initial Adaptation Phase
+
+The first pattern evident across all folds is the dramatic reduction in error metrics during the first 2-3 epochs:
+
+| Fold | Initial MAPE | MAPE after 3 epochs | Improvement |
+|------|--------------|---------------------|-------------|
+| 1    | 90.87%       | 16.77%              | 81.5%       |
+| 2    | 90.53%       | 9.23%               | 89.8%       |
+| 3    | 92.23%       | 5.70%               | 93.8%       |
+| 4    | 94.14%       | 13.12%              | 86.1%       |
+| 5    | 95.13%       | 24.81%              | 73.9%       |
+
+This indicates that the model quickly adapts to capture the fundamental price patterns in the data, even before fine-tuning begins.
+
+### Error Metric Progression
+
+The Mean Absolute Percentage Error (MAPE) shows consistent improvement throughout training:
+
+- **Fold 1**: 90.87% → 7.31% (final)
+- **Fold 2**: 90.53% → 4.81% (best)
+- **Fold 3**: 92.23% → 3.59% (best)
+- **Fold 4**: 94.14% → 3.72% (best)
+- **Fold 5**: 95.13% → 3.51% (best)
+
+Later folds achieve lower MAPE values, suggesting that the model benefits from increasing data availability or possibly that more recent financial data (used in later folds) has more predictable patterns.
+
+### MSE and MAE Trends
+
+The RMSE (Root Mean Square Error) and MAE (Mean Absolute Error) show similar improvements:
+
+- **Fold 2 (Best)**: RMSE: 2.19 → 0.14, MAE: 2.18 → 0.11
+- **Fold 3 (Best)**: RMSE: 1.59 → 0.16, MAE: 1.59 → 0.12
+- **Fold 5 (Best)**: RMSE: 3.44 → 0.16, MAE: 3.44 → 0.12
+
+These metrics confirm the model's increasing accuracy in price prediction across all folds.
+
+## Regime Detection Analysis
+
+The regime distribution shows interesting patterns during training:
+
+### Initial Regime Specialization
+
+In early training, each fold shows a strong preference for specific regimes:
+
+- **Fold 2**: By epoch 5, regime 3 dominates (54%)
+- **Fold 3**: By epoch 6, regime 4 dominates (79%)
+- **Fold 4**: By epoch 6, regime 3 dominates (43%)
+- **Fold 5**: By epoch 6, regime 2 dominates (89%)
+
+This suggests the model initially identifies a dominant market regime for each time period.
+
+### Regime Balancing
+
+As training progresses, regime distributions consistently balance toward approximately 25% each:
+
+```
+Epoch 15 (Fold 3): [0.2591144 0.24519493 0.24478552 0.25090513]
+Epoch 16 (Fold 4): [0.24918784 0.24459712 0.24935074 0.25686428]
+Epoch 19 (Fold 5): [0.25001785 0.25751257 0.24698563 0.24548395]
+```
+
+This balanced distribution suggests that after sufficient training, the model learns to identify multiple market regimes with similar frequency, indicating a more nuanced understanding of market states rather than overfitting to a single regime explanation.
+
+## Signal Distribution Patterns
+
+The model produces three signal categories, which also show evolution during training:
+
+### Early Signal Specialization
+
+Similar to regimes, early training shows a preference for one signal:
+
+- **Fold 2 (Epoch 5)**: Signal 3 dominates (66%)
+- **Fold 3 (Epoch 6)**: Signal 3 dominates (79%)
+- **Fold 5 (Epoch 6)**: Signal 2 dominates (51%)
+
+### Signal Balancing
+
+By the end of training, signals are more evenly distributed:
+
+```
+Epoch 24 (Fold 2): [0.33942443 0.32072926 0.3398463]
+Epoch 15 (Fold 3): [0.32974148 0.33232832 0.3379302]
+Epoch 19 (Fold 5): [0.32863995 0.3293468 0.34201327]
+```
+
+This evolution suggests that while the model initially focuses on strong signals that explain most of the variance, it later develops more nuanced signal processing capabilities.
+
+## Learning Dynamics
+
+### Optimal Learning Rate
+
+The learning rate starts at 0.000003 and peaks at 0.000010 around epochs 5-7, before gradually decreasing. Significant performance improvements correlate with this peak learning rate period, suggesting this range effectively balances exploration and exploitation.
+
+### Early Stopping Pattern
+
+Folds exhibit different early stopping points:
+- Fold 1: Stops at epoch 10
+- Fold 2: Stops at epoch 25
+- Fold 3: Stops at epoch 15
+- Fold 4: Stops at epoch 16
+- Fold 5: Continues through epoch 19
+
+Later folds generally train longer before early stopping triggers, suggesting more complex patterns in recent data requiring additional training.
+
+## TPU Efficiency Observations
+
+The TPU-specific optimizations show their value through:
+
+1. Consistent batch processing without OOM errors
+2. Smooth execution across all folds
+3. Effective memory management with large parameter count (1.93M parameters)
+4. Stable convergence patterns across folds
+
+## Conclusion
+
+The Scalar-Matrix LSTM model demonstrates strong predictive capabilities with extremely low error rates (MAPE as low as 3.5%), while showing evidence of learning meaningful market regimes and signals. The high-parameter count (1.93M) is efficiently managed by the TPU implementation.
+
+The progression of training shows an initial rapid adaptation phase followed by more nuanced refinement, with the model ultimately achieving balanced regime and signal distributions that suggest it has learned genuine market patterns rather than overfitting to specific temporal artifacts.
+
+The significant reduction in MAPE from ~90% to ~3-7% across all folds indicates that the model has successfully captured the underlying financial time series dynamics.
