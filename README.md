@@ -616,6 +616,109 @@ The TPU-specific optimizations show their value through:
 
 The Scalar-Matrix LSTM model demonstrates strong predictive capabilities with extremely low error rates (MAPE as low as 3.5%), while showing evidence of learning meaningful market regimes and signals. The high-parameter count (1.93M) is efficiently managed by the TPU implementation.
 
+
+# Prediction Timeframe Analysis for the Scalar-Matrix LSTM Model
+
+## Overview of Prediction Structure
+
+The TPU-accelerated Scalar-Matrix LSTM is designed to predict **5 future time steps** based on a historical sequence. This is evident in both the data preparation and model architecture:
+
+### Input Sequence Length
+
+In `main.py`, the model's configuration defines:
+
+```python
+SEQ_LENGTH = 64
+```
+
+This means each input sample consists of 64 consecutive time steps of financial data.
+
+### Target Output Length
+
+The model generates predictions for 5 future steps, as seen in the sequence creation function:
+
+```python
+def create_sequences(scaled_data, target_scaled, seq_length, augment=True):
+    X, y = [], []
+    for i in range(seq_length, len(scaled_data) - 5):
+        seq = scaled_data[i - seq_length:i]
+        # ...
+        y.append(target_scaled[i:i+5].flatten())  # 5 future steps
+    return np.array(X), np.array(y)
+```
+
+This is further confirmed by the model's output heads, all designed with 5 output units:
+
+```python
+self.price_head = nn.Linear(self.pre_fc_dim, 5)
+self.direction_head = nn.Linear(self.pre_fc_dim, 5)
+self.volatility_head = nn.Linear(self.pre_fc_dim, 5)
+```
+
+## Time Resolution
+
+The model operates on **hourly data**, as indicated by the data fetching functions:
+
+```python
+def get_hourly_data(ticker, start_date, end_date, max_workers=3):
+    file_path = f"{ticker}_hourly_{start_date}_{end_date}.csv"
+    # ...
+```
+
+And the data download function:
+
+```python
+data = download(
+    ticker,
+    start=start.strftime("%Y-%m-%d"), 
+    end=end.strftime("%Y-%m-%d"),
+    interval='1h',  # Hourly interval
+    auto_adjust=True
+)
+```
+
+## Prediction Timeframe Summary
+
+Based on the code analysis:
+
+1. **Input Window**: 64 hours (approximately 2.7 days) of historical financial data
+2. **Prediction Horizon**: 5 hours into the future
+3. **Resolution**: Hourly price predictions
+
+## Evaluation Methodology
+
+When evaluating the model, the predictions are compared to the actual prices for those 5 future hours. This is reflected in the evaluation metrics:
+
+```python
+price_mape = torch.mean(torch.abs((all_price_targets - all_price_outputs) / (all_price_targets + 1e-8))) * 100
+price_rmse = torch.sqrt(torch.mean((all_price_targets - all_price_outputs) ** 2))
+price_mae = torch.mean(torch.abs(all_price_targets - all_price_outputs))
+```
+
+The directional accuracy specifically evaluates whether the model correctly predicted price movements between consecutive hours:
+
+```python
+# Calculate price differences between consecutive predictions
+diff_pred = all_price_outputs[:, 1:] - all_price_outputs[:, :-1]
+diff_true = all_price_targets[:, 1:] - all_price_targets[:, :-1]
+            
+# Convert to binary UP (>0) matching the label creation logic
+binary_pred_up = (diff_pred > 0).float()
+binary_true_up = (diff_true > 0).float()
+```
+
+## Training-Testing Configuration
+
+The model uses a time series cross-validation approach, which ensures that training data always precedes validation data, maintaining the temporal integrity of financial series:
+
+```python
+tscv = TimeSeriesSplit(n_splits=5)
+for fold, (train_idx, val_idx) in enumerate(tscv.split(features)):
+    # ...
+```
+
+This approach progressively increases the amount of training data while always validating on unseen future data.
+
 The progression of training shows an initial rapid adaptation phase followed by more nuanced refinement, with the model ultimately achieving balanced regime and signal distributions that suggest it has learned genuine market patterns rather than overfitting to specific temporal artifacts.
 
 The significant reduction in MAPE from ~90% to ~3-7% across all folds indicates that the model has successfully captured the underlying financial time series dynamics.
