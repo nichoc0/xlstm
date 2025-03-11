@@ -218,3 +218,270 @@ This implements the structured state space model, which processes temporal data 
 ## Conclusion
 
 The TPU-accelerated Scalar-Matrix LSTM represents a significant advancement in memory-based models for financial time series. By combining matrix memory, structured state spaces, and financial domain-specific optimizations, it achieves both expressiveness and efficiency. The implementation is carefully optimized for memory usage and computational efficiency, making it suitable for deployment in resource-constrained environments.
+
+
+# Understanding TPU-Accelerated LSTM for Financial Time Series: main.py Explained
+
+This document provides an in-depth explanation of `main.py`, which is the primary execution script for the TPU-accelerated Scalar-Matrix LSTM model for financial time series analysis.
+
+## Overview
+
+The `main.py` script orchestrates the entire workflow, including:
+
+1. Data acquisition and preprocessing
+2. Feature engineering
+3. Model configuration and initialization
+4. Training and evaluation with TPU acceleration
+5. Performance monitoring
+
+## Data Acquisition and Processing
+
+### Time Series Data Collection
+
+The script implements a robust data collection strategy that handles the rate-limited nature of financial APIs:
+
+```python
+def safe_fetch(ticker, start, end, retries=15, delay=10):
+```
+
+This function employs:
+1. **Exponential backoff**: The delay between retries increases exponentially to avoid API rate limits
+2. **Error handling**: Specific handling for rate limiting errors
+3. **Data validation**: Checks to ensure the returned data is valid
+
+For larger datasets, the script uses a chunking strategy:
+
+```python
+def fetch_chunk(ticker, start, end):
+```
+
+This breaks the request into manageable time periods and concatenates them later:
+
+```python
+def get_stock_data(ticker, start_date, end_date, max_workers=3):
+```
+
+The chunking approach is mathematically optimized using:
+
+$$\text{chunk\_size} = \min(\text{max\_days}, \frac{\text{total\_days}}{\text{optimal\_chunks}})$$
+
+where `optimal_chunks` is determined based on API rate limits.
+
+### Data Merging and Alignment
+
+A critical function for financial time series analysis is `merge_datasets()`, which aligns data from different frequencies (daily and hourly):
+
+```python
+def merge_datasets(daily_df, hourly_df):
+```
+
+This function uses interpolation and forward-filling techniques to create a consistent time series:
+
+$$X_{interpolated}(t) = X_{last} + \frac{t - t_{last}}{t_{next} - t_{last}} \cdot (X_{next} - X_{last})$$
+
+## Feature Engineering
+
+### Technical Indicators
+
+The script generates a comprehensive set of technical indicators through the `prepare_data()` and `add_technical_indicators()` functions:
+
+```python
+def prepare_data(df):
+    # ...
+    df['Returns'] = close.pct_change()
+    df['EMA_Short'] = close.ewm(span=12, adjust=False).mean() / close - 1
+    # ...
+```
+
+Mathematically, the EMA (Exponential Moving Average) is calculated as:
+
+$$\text{EMA}_t = \alpha \cdot \text{price}_t + (1 - \alpha) \cdot \text{EMA}_{t-1}$$
+
+where $\alpha = \frac{2}{span+1}$
+
+The RSI (Relative Strength Index) is calculated as:
+
+$$\text{RSI} = 100 - \frac{100}{1 + \text{RS}}$$
+
+where $\text{RS} = \frac{\text{average gain}}{\text{average loss}}$
+
+### Sequence Generation and Augmentation
+
+Time series data is transformed into sequence-based training examples using:
+
+```python
+def create_sequences(scaled_data, target_scaled, seq_length, augment=True):
+```
+
+With data augmentation applied using controlled noise injection:
+
+$$X_{augmented} = X + \mathcal{N}(0, 0.001 \cdot \sigma_X)$$
+
+This preserves the signal's basic structure while improving model generalization.
+
+## Model Training with TPU Acceleration
+
+### TPU-Optimized Data Loading
+
+A critical component for TPU acceleration is the data loading pipeline:
+
+```python
+def create_tpu_dataloader(dataset, batch_size, shuffle=True):
+```
+
+This configures the dataloader specifically for TPU execution by:
+1. Disabling multiprocessing workers (`num_workers=0`)
+2. Ensuring proper batch sizes for TPU memory tiles
+3. Managing dataset prefetching
+
+### Learning Rate Scheduling
+
+The training loop implements a sophisticated learning rate schedule with warmup and decay:
+
+```python
+def lr_schedule(epoch):
+    if epoch < 5:
+        # Warmup phase - linear increase from 0.1x to 1x
+        return 0.1 + 0.9 * epoch / 5
+    else:
+        # Decay phase - cosine decay
+        return 0.1 + 0.9 * (1 + math.cos(math.pi * (epoch - 5) / (epochs - 5))) / 2
+```
+
+This is mathematically defined as:
+
+$$\eta_t = \begin{cases}
+\eta_{min} + (\eta_{max} - \eta_{min}) \cdot \frac{t}{T_{warmup}} & \text{if } t < T_{warmup} \\
+\eta_{min} + (\eta_{max} - \eta_{min}) \cdot \frac{1 + \cos(\pi \cdot \frac{t - T_{warmup}}{T_{total} - T_{warmup}})}{2} & \text{otherwise}
+\end{cases}$$
+
+### TPU-Specific Optimization
+
+The training loop includes several TPU-specific optimizations:
+
+1. **Mark_step for execution**: `xm.mark_step()` ensures TPU execution barriers are properly set
+2. **Gradient accumulation**: To optimize memory usage, gradients are accumulated across mini-batches
+3. **Host-device synchronization**: Critical tensors are explicitly moved to host memory to avoid device memory accumulation
+
+```python
+# TPU-friendly backward pass
+loss.backward()
+
+if (batch_idx + 1) % 2 == 0:
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_VALUE)
+    optimizer.step()
+    optimizer.zero_grad()
+    # Critical for TPU execution
+    xm.mark_step()
+```
+
+### Multi-Objective Loss Functions
+
+The training process uses multiple specialized loss functions tailored for financial forecasting:
+
+```python
+criterion_price = nn.HuberLoss(delta=1.0)
+pos_weight = torch.tensor([2.0]).to(device)
+criterion_direction = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+criterion_volatility = nn.MSELoss()
+```
+
+1. **Huber Loss**: For price predictions, uses a hybrid approach that reduces sensitivity to outliers:
+
+$$L_{\delta}(y, f(x)) = \begin{cases}
+\frac{1}{2}(y - f(x))^2 & \text{for } |y - f(x)| \leq \delta, \\
+\delta \cdot (|y - f(x)| - \frac{1}{2}\delta) & \text{otherwise}
+\end{cases}$$
+
+2. **Weighted BCE Loss**: For directional predictions, assigns higher weight to up movements:
+
+$$L_{BCE} = -\frac{1}{N}\sum_i w_i[y_i \log(\hat{y}_i) + (1 - y_i) \log(1 - \hat{y}_i)]$$
+
+where $w_i$ is typically higher (2.0) for positive class (up movement) examples.
+
+3. **MSE Loss**: For volatility prediction:
+
+$$L_{MSE} = \frac{1}{N}\sum_i(y_i - \hat{y}_i)^2$$
+
+### Performance Metrics
+
+The model tracks multiple specialized metrics for financial forecasting:
+
+1. **Price MAPE** (Mean Absolute Percentage Error):
+   
+$$\text{MAPE} = \frac{100\%}{n} \sum_{t=1}^{n} \left| \frac{A_t - F_t}{A_t} \right|$$
+
+2. **Directional Accuracy**: The percentage of correct movement direction predictions:
+
+$$\text{Directional Accuracy} = \frac{100\%}{n-1} \sum_{t=1}^{n-1} \mathbf{1}_{\text{sign}(P_{t+1} - P_t) = \text{sign}(\hat{P}_{t+1} - \hat{P}_t)}$$
+
+3. **Regime Analysis**: Tracking the distribution of predicted market regimes for model interpretability:
+
+$$\text{Regime Distribution} = \left[\frac{1}{n} \sum_{i=1}^{n} r_{i,1}, \ldots, \frac{1}{n} \sum_{i=1}^{n} r_{i,4}\right]$$
+
+## Curriculum Learning Strategy
+
+The implementation uses curriculum learning to gradually increase the complexity of the training objective:
+
+```python
+# Add curriculum learning - focus first on price, then direction
+dir_weight = min(0.5 + epoch / 10, 2.0)  # Gradually increase direction weight
+vol_weight = min(0.2 + epoch / 20, 0.5)  # Gradually increase volatility weight
+```
+
+This is mathematically defined as increasing the contribution of direction and volatility tasks over time:
+
+$$L_{total} = L_{price} + \min\left(0.5 + \frac{\text{epoch}}{10}, 2.0\right) \cdot L_{direction} + \min\left(0.2 + \frac{\text{epoch}}{20}, 0.5\right) \cdot L_{volatility}$$
+
+## Early Stopping with Delta Threshold
+
+The implementation uses a sophisticated early stopping approach that includes both patience and a minimum improvement threshold:
+
+```python
+if val_loss < (best_val_loss - min_delta):
+    best_val_loss = val_loss
+    waiting = 0
+else:
+    waiting += 1
+    if waiting >= patience:
+        print(f'Early stopping triggered at epoch {epoch+1}')
+        break
+```
+
+This improves upon standard early stopping by requiring a meaningful improvement (not just any improvement) to reset the patience counter, based on:
+
+$$\Delta_{val\_loss} = \text{best\_val\_loss} - \text{current\_val\_loss} > \delta_{min}$$
+
+## Main Execution Flow
+
+The `main()` function orchestrates the entire pipeline, covering:
+
+1. Data loading and preparation
+2. Cross-validation with time series split
+3. Feature normalization
+4. Sequence generation and sampling
+5. Model initialization and training
+6. Model saving and evaluation
+
+Time series cross-validation is implemented to ensure proper training-validation separation:
+
+```python
+tscv = TimeSeriesSplit(n_splits=5)
+for fold, (train_idx, val_idx) in enumerate(tscv.split(features)):
+    # ...
+```
+
+This maintains the temporal ordering, ensuring that models are always trained on past data and evaluated on future data, preventing information leakage.
+
+## Conclusion
+
+The `main.py` script represents a sophisticated implementation of modern deep learning techniques for financial time series, optimized for TPU execution. It incorporates numerous mathematical and algorithmic optimizations specifically designed for the challenges of financial forecasting, including:
+
+1. Robust data acquisition and preprocessing
+2. Finance-specific feature engineering
+3. TPU-optimized training procedures
+4. Multi-objective learning with curriculum strategy
+5. Specialized loss functions and metrics for financial time series
+6. Memory-efficient implementation for long sequences
+
+These elements combine to create a powerful framework for high-performance financial forecasting using Scalar-Matrix LSTM architectures.
