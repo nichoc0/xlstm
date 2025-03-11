@@ -80,7 +80,6 @@ $$C_t[t] = f_{cum}[t] \cdot C_{prev} + C_{updates}[t]$$
 
 $$L_{dir}(y_{pred}, y_{true}) = \frac{1}{T-1}\sum_{t=1}^{T-1} \mathbf{1}_{\{sign(y_{pred,t+1} - y_{pred,t}) \neq sign(y_{true,t+1} - y_{true,t})\}} \cdot w_t$$
 
-
 Where $w_t$ is:
 - $w_t = w_{up}$ when $y_{true,t+1} - y_{true,t} > 0$
 - $w_t = w_{down}$ when $y_{true,t+1} - y_{true,t} < 0$
@@ -117,13 +116,9 @@ $$\text{trend strength} = \frac{|r| + 1}{2}$$
 
 For greater efficiency, the implementation also uses fast and slow exponential moving averages (EMAs):
 
+$$\text{fast EMA}_{t} = \alpha_{\text{fast}} \cdot x_t + (1-\alpha_{\text{fast}}) \cdot \text{fast EMA}_{t-1}$$
 
-$$ \text{fast EMA}_{t} = \alpha_{\text{fast}} \cdot x_t + (1-\alpha_{\text{fast}}) \cdot \text{fast EMA}_{t-1} $$
-
-$$ \text{slow EMA}_{t} = \alpha_{\text{slow}} \cdot x_t + (1-\alpha_{\text{slow}}) \cdot \text{slow EMA}_{t-1} $$
-
-Agreement between EMAs produces a trend signal:
-$$\text{agreement}_t = \text{sign}(\Delta \text{fast EMA}_t) \cdot \text{sign}(\Delta \text{slow EMA}_t)$$
+$$\text{slow EMA}_{t} = \alpha_{\text{slow}} \cdot x_t + (1-\alpha_{\text{slow}}) \cdot \text{slow EMA}_{t-1}$$
 
 ### 4. Memory Mixing
 
@@ -266,7 +261,7 @@ def get_stock_data(ticker, start_date, end_date, max_workers=3):
 
 The chunking approach is mathematically optimized using:
 
-$$ \text{chunk\_size} = \min(\text{max\_days}, \frac{\text{total\_days}}{\text{optimal\_chunks}}) $$
+$$\text{chunk\_size} = \min(\text{max\_days}, \frac{\text{total\_days}}{\text{optimal\_chunks}})$$
 
 where `optimal_chunks` is determined based on API rate limits.
 
@@ -298,7 +293,7 @@ def prepare_data(df):
 
 Mathematically, the EMA (Exponential Moving Average) is calculated as:
 
-$$ \text{EMA}_t = \alpha \cdot \text{price}_t + (1 - \alpha) \cdot \text{EMA}_{t-1} $$
+$$\text{EMA}_t = \alpha \cdot \text{price}_t + (1 - \alpha) \cdot \text{EMA}_{t-1}$$
 
 where $\alpha = \frac{2}{span+1}$
 
@@ -416,7 +411,7 @@ $$\text{MAPE} = \frac{100\%}{n} \sum_{t=1}^{n} \left| \frac{A_t - F_t}{A_t} \rig
 
 2. **Directional Accuracy**: The percentage of correct movement direction predictions:
 
-$$ \text{Directional Accuracy} = \frac{100\%}{n-1} \sum_{t=1}^{n-1} \mathbf{1}_{\{\text{sign}(P_{t+1} - P_t) = \text{sign}(\hat{P}_{t+1} - \hat{P}_t)\}} $$
+$$\text{Directional Accuracy} = \frac{100\%}{n-1} \sum_{t=1}^{n-1} \mathbf{1}_{\{\text{sign}(P_{t+1} - P_t) = \text{sign}(\hat{P}_{t+1} - \hat{P}_t)\}}$$
 
 3. **Regime Analysis**: Tracking the distribution of predicted market regimes for model interpretability:
 
@@ -453,7 +448,7 @@ else:
 
 This improves upon standard early stopping by requiring a meaningful improvement (not just any improvement) to reset the patience counter, based on:
 
-$$ \Delta_{\text{val\_loss}} = \text{best\_val\_loss} - \text{current\_val\_loss} > \delta_{\min} $$
+$$\Delta_{\text{val\_loss}} = \text{best\_val\_loss} - \text{current\_val\_loss} > \delta_{\min}$$
 
 ## Main Execution Flow
 
