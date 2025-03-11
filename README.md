@@ -78,8 +78,7 @@ $$C_t[t] = f_{cum}[t] \cdot C_{prev} + C_{updates}[t]$$
 
 #### Asymmetric Directional Loss
 
-$$L_{dir}(y_{pred}, y_{true}) = \frac{1}{T-1}\sum_{t=1}^{T-1} \mathbf{1}_{\{sign(y_{pred,t+1} - y_{pred,t}) \$$
-
+$$L_{dir}(y_{pred}, y_{true}) = \frac{1}{T-1}\sum_{t=1}^{T-1} \mathbf{1}_{\{sign(y_{pred,t+1} - y_{pred,t}) \neq sign(y_{true,t+1} - y_{true,t})\}} \cdot w_t$$
 
 Where $w_t$ is:
 - $w_t = w_{up}$ when $y_{true,t+1} - y_{true,t} > 0$
